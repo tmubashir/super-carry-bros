@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Super Carry Bros.</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html,body{margin:0;padding:0;background:#0d0f1a;height:100%;overflow:hidden;
+    font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100%;}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;
+    max-width:100vw;max-height:100vh;aspect-ratio:16/9;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+<script>
+'use strict';
+// ============================================================================
+// SUPER CARRY BROS. — vertical slice: 1-1 Demo Day
+// Score = your single best exit. TVPI is the big fake number. DPI is the truth.
+// ============================================================================
+
+const cvs = document.getElementById('game');
+const ctx = cvs.getContext('2d');
+const W = 960, H = 540;
+
+// ---------------------------------------------------------------- constants
+const TILE = 36;
+const GRAV = 2200;
+const RUN = 340;
+const JUMP_MIN = -560;        // tap ≈ 2 tiles
+const JUMP_HOLD = -1600;      // conviction: extra thrust while held
+const HOLD_MAX = 0.34;        // seconds of extra thrust; full hold ≈ 5 tiles
+const FUND_YEARS = 10;
+const SECS_PER_YEAR = 22;     // ~3.7 min fund life
+const CHECK = 10;             // $10M initial check per company
+const FUND_SIZE = 100;        // $100M fund
+const START_RESERVES = 40;    // $40M reserves for follow-ons
+const ROUND_NAMES = ['Seed','Series A','Series B','Series C','Series D','Growth'];
+const ROUND_SIZE = 7;         // term sheets per round before a markup round closes
+const DILUTE = 0.85;          // sprite scale per round
+const FOLLOWON_COST = [0, 2, 4, 7, 11, 16]; // reserves per coin, by round
+
+const PASS_LINES = [
+  '"We\'re going to pass, but let\'s keep in touch."',
+  '"Too early for us."',
+  '"Great team, wrong market."',
+  '"Love it — come back at $2M ARR."',
+  '"This is more of a feature than a company."',
+  '"We\'re pattern-matching this to something that didn\'t work."',
+];
+const FOUNDER_PITCHES = [
+  'Uber for lawns','Airbnb for boats','Stripe for pets','Tinder for B2B',
+  'Notion for dogs','Figma for HVAC','Shopify for funerals','Slack for cults',
+  'Duolingo for taxes','Palantir for weddings'
+];
+const LP_NAGS = [
+  'LP update due.', 'LPs asking about DPI.', 'LPs "checking in".',
+  'LP: "when do we see cash?"', 'LP: "interesting marks."',
+  'LP: "our consultant has questions."', 'LP: "we may reduce our commitment."'
+];
+
+// ---------------------------------------------------------------- the boss
+// TIER 1 VC has no health bar. He has a valuation, and it only goes up.
+// Every hit you land is a bid. You can absolutely beat him. That's the trap.
+const HOT_ENTRY  = 60;    // $60M post if you never bid
+const BID_STEP   = 45;    // what one satisfying stomp costs you
+const HOT_TARGET = 240;   // mark multiplier = HOT_TARGET / post-money
+const DEAL_SECS  = 60;    // "48 hours to sign" — long enough to wait him out
+const HOT_DEALS = [
+  {name:'GROUNDTRUTH', pitch:'foundation models for HVAC'},
+  {name:'PARABOLA',    pitch:'the Stripe for nuclear'},
+  {name:'MONOLITH',    pitch:'AI agents for AI agents'},
+  {name:'VELLUM',      pitch:'the Figma for litigation'},
+  {name:'ARCLIGHT',    pitch:'defense tech, but friendly'},
+];
+const BID_BARKS = ['COMPETITIVE.','YOU\'RE IN IT.','THEY BLINKED.','MOMENTUM.','CONVICTION.'];
+
+// ---------------------------------------------------------------- audio
+const AC = window.AudioContext ? new AudioContext() : null;
+function blip(freq, dur, type, vol, slide) {
+  if (!AC) return;
+  if (AC.state === 'suspended') AC.resume();
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || 'square'; o.frequency.value = freq;
+  if (slide) o.frequency.exponentialRampToValueAtTime(slide, AC.currentTime + dur);
+  g.gain.value = vol || 0.06;
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + dur);
+  o.connect(g).connect(AC.destination);
+  o.start(); o.stop(AC.currentTime + dur);
+}
+const sfx = {
+  coin()   { blip(1180, .09, 'sine', .07); setTimeout(()=>blip(1560,.12,'sine',.06), 60); }, // slack-ish
+  markup() { blip(660, .07, 'square', .05); setTimeout(()=>blip(990,.1,'square',.05), 70);
+             setTimeout(()=>blip(1320,.14,'square',.05), 140); }, // cash register-ish
+  jump()   { blip(300, .12, 'square', .04, 520); },
+  stomp()  { blip(220, .1, 'square', .06, 90); },
+  exit()   { [523,659,784,1047].forEach((f,i)=>setTimeout(()=>blip(f,.18,'square',.06), i*110)); },
+  death()  { /* the silence of an unanswered email */ },
+  denied() { blip(140, .18, 'sawtooth', .05, 80); },
+  seat()   { blip(784, .1, 'sine', .06); setTimeout(()=>blip(988,.16,'sine',.06), 90); },
+};
+
+// ---------------------------------------------------------------- level
+// Legend: # ground  = platform  b brick  t termsheet  s SAFE  U uncapped SAFE
+//         B board seat  P pro rata  M 2&20 mushroom  g goomba  F flag  C conveyor(founders)
+//         ^ spike pit marker (visual)
+const LEVEL_ROWS = [
+"................................................................................................................................................................",
+"................................................................................................................................................................",
+"..........................................................U....................................................................................................",
+"................................................................................................................................................................",
+"...................t.t.t..............................=====..........s...................B..............t..t..t.........................U.......................",
+"..............................................................................========..===..........=========..............s.s.s.....===......................",
+"..........................................t.s.t..............................................................................=====.............................",
+".......................................======.......M...............t.t..........................P...............g.....................................F.......",
+"..................................................====..........==========...............g..........====.......=====...........g.......................F.......",
+"......CCCCCCCCCC.......g......s.s.s.......t.t.t.........s.s.s.................t..t............====..........................========...................F.......",
+"##########################..####################...####################################..####################################################...################",
+"##########################..####################...####################################..####################################################...################",
+];
+// The Tier 1 VC arena. Two routes to the HOT DEAL: the ground (through him)
+// or the platforms (around him). Only one of them is cheap.
+// Legend adds: D pass door  X boss spawn  H the hot deal
+const ARENA_ROWS = [
+"..................................",
+"..................................",
+"..................................",
+"..................................",
+".............................G....",
+"...........=====....=====....G....",
+".............................G....",
+"...====......................G.F..",
+".............................G....",
+".D.............X.............G..H.",
+"##################################",
+"##################################",
+];
+let gateOpen = false;   // the signing window. he is standing in front of it.
+
+let MAP = LEVEL_ROWS, MAP_W = LEVEL_ROWS[0].length, MAP_H = LEVEL_ROWS.length;
+function setMap(rows) { MAP = rows; MAP_W = rows[0].length; MAP_H = rows.length; }
+
+// '=' platforms are one-way: they catch you on the way down and are not there
+// on the way up, so you never bonk a shoulder on the invisible half of a tile.
+const solidFull = ch => ch === '#' || ch === 'b' || ch === 'C' || (ch === 'G' && !gateOpen);
+const solidTop  = ch => solidFull(ch) || ch === '=';
+function tileAt(tx, ty) {
+  if (tx < 0 || tx >= MAP_W) return '#';
+  if (ty < 0 || ty >= MAP_H) return '.';
+  return MAP[ty][tx];
+}
+
+// ---------------------------------------------------------------- game state
+let state;       // 'title' | 'play' | 'dead' | 'exit' | 'gameover'
+let keys = {};
+let stateTimer = 0;
+let G;           // run state
+
+function newRun() {
+  G = {
+    companies: 10,          // remaining, incl. current
+    companyIdx: 1,          // which company we're on (1-based, for flavor)
+    exits: [],              // realized exit values ($M)
+    deadPaper: 0,           // paper value written to zero (for flavor)
+    reserves: START_RESERVES,
+    followOnSpent: 0,
+    clock: FUND_YEARS * SECS_PER_YEAR,
+    toast: null, toastT: 0,
+    nagIdx: 0, nextNag: SECS_PER_YEAR * 1.5,
+    shake: 0,
+    mode: 'level',
+    resolved: 0,            // companies that have exited or died
+    bossQueue: [1, 5],      // a hot deal crosses your desk after 1 and 5 of them
+    antiPortfolio: [],      // the ones you didn't get
+    pendingHot: null,       // hot deal won, waiting to be played
+    hotIdx: 0,
+    deal: null,
+  };
+  spawnCompany();
+  state = 'play';
+}
+
+function paperTotal() { // live paper marks
+  return G.company ? G.company.paper : 0;
+}
+function deployed() { return CHECK * G.companyIdx + G.followOnSpent; }
+function dpiVal() { return G.exits.reduce((a,b)=>a+b,0) / deployed(); }
+function tvpiVal() {
+  return (G.exits.reduce((a,b)=>a+b,0) + paperTotal()) / deployed();
+}
+function bestExit() { return G.exits.length ? Math.max(...G.exits) : 0; }
+
+function spawnCompany() {
+  G.mode = 'level';
+  setMap(LEVEL_ROWS);
+  const hot = G.pendingHot; G.pendingHot = null;
+  G.company = {
+    paper: CHECK,           // $10M in at seed
+    round: 0,               // 0 = seed
+    roundCoins: 0,
+    proRata: 0,             // seconds of coin doubler left
+    fees: 0,                // seconds of 2&20 invincibility
+    hot: hot ? hot.name : null,
+    mult: hot ? hot.mult : 1,   // what your ownership is worth per mark
+  };
+  P.x = TILE * 2.5; P.y = TILE * 8; P.vx = 0; P.vy = 0; P.dir = 1;
+  // paid up for the hot deal? you own less of it, so you start smaller.
+  P.scale = hot ? 0.6 + 0.4 * Math.min(1, hot.mult / 4) : 1;
+  P.onGround = false; P.holdT = 0; P.dead = false;
+  cam.x = 0;
+  spawnEntities();
+  if (hot) toast(hot.name + ' — you own ' + hot.own.toFixed(1) + '% of it.', 3);
+}
+
+function spawnBoss() {
+  G.mode = 'boss';
+  setMap(ARENA_ROWS);
+  gateOpen = false;
+  G.company = null;
+  const d = HOT_DEALS[G.hotIdx++ % HOT_DEALS.length];
+  G.deal = { name:d.name, pitch:d.pitch, val:HOT_ENTRY, bids:0, free:0,
+             t:DEAL_SECS, passT:0, hp:3 };
+  P.x = TILE * 4; P.y = TILE * 10; P.vx = 0; P.vy = 0; P.dir = 1;
+  P.scale = 1; P.onGround = true; P.holdT = 0; P.dead = false;
+  cam.x = 0;
+  spawnEntities();
+  state = 'bossintro'; stateTimer = 0;
+}
+
+// what comes across the desk next
+function nextScene() {
+  if (G.bossQueue.length && G.resolved >= G.bossQueue[0]) {
+    G.bossQueue.shift(); return spawnBoss();
+  }
+  G.companyIdx++; spawnCompany(); state = 'play';
+}
+
+// player
+const P = { x:0, y:0, vx:0, vy:0, w:26, h:34, scale:1, dir:1, onGround:false,
+            holdT:0, jumpHeld:false, dead:false };
+const cam = { x:0 };
+
+// entities (coins, enemies, founders, flag)
+let ents = [];
+function spawnEntities() {
+  ents = [];
+  for (let ty = 0; ty < MAP_H; ty++) for (let tx = 0; tx < MAP_W; tx++) {
+    const ch = MAP[ty][tx], x = tx*TILE + TILE/2, y = ty*TILE + TILE/2;
+    if (ch === 't') ents.push({t:'coin', kind:'term', x, y, r:10, val:2,  taken:false});
+    if (ch === 's') ents.push({t:'coin', kind:'safe', x, y, r:8,  val:1,  taken:false});
+    if (ch === 'U') ents.push({t:'coin', kind:'uncapped', x, y, r:13, val:12, taken:false});
+    if (ch === 'B') ents.push({t:'coin', kind:'seat', x, y, r:12, taken:false});
+    if (ch === 'P') ents.push({t:'coin', kind:'prorata', x, y, r:11, taken:false});
+    if (ch === 'M') ents.push({t:'coin', kind:'fees', x, y, r:11, taken:false});
+    if (ch === 'g') ents.push({t:'goomba', x, y: ty*TILE + TILE - 13, vx:-60, w:26, h:26, dead:0});
+    if (ch === 'F' && ty === 7) ents.push({t:'flag', x: tx*TILE + TILE/2, y: ty*TILE});
+    if (ch === 'X') ents.push({t:'boss', x, y:(ty+1)*TILE, groundY:(ty+1)*TILE,
+                               face:-1, vx:0, vy:0, stun:0, mode:'walk',
+                               timer:1.6, atk:0, next:'pound', hp:3, defeated:0});
+    if (ch === 'H') ents.push({t:'hotdeal', x, y:(ty+1)*TILE});
+    if (ch === 'D') ents.push({t:'door', x, y:(ty+1)*TILE});
+  }
+  // founders on the demo-day conveyor
+  if (MAP.some(r => r.indexOf('C') >= 0))
+    for (let i = 0; i < 5; i++)
+      ents.push({t:'founder', x: TILE*(6.5 + i*2), baseX: TILE*(6.5+i*2), y: TILE*9.5-14,
+                 pitch: (Math.random()*FOUNDER_PITCHES.length)|0, pt: i*0.8});
+}
+
+// ---------------------------------------------------------------- helpers
+function toast(msg, secs) { G.toast = msg; G.toastT = secs || 2.2; }
+function fmtM(v) { return '$' + (v>=1000 ? (v/1000).toFixed(1)+'B' : v.toFixed(0)+'M'); }
+function rectHit(ax,ay,aw,ah, bx,by,bw,bh){
+  return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+}
+function playerBox() {
+  const w = P.w*P.scale, h = P.h*P.scale;
+  return {x: P.x - w/2, y: P.y - h, w, h};
+}
+
+// ---------------------------------------------------------------- update
+let last = 0;
+function frame(ts) {
+  const dt = Math.min((ts - last)/1000, 0.033); last = ts;
+  update(dt); render(dt);
+  requestAnimationFrame(frame);
+}
+
+function update(dt) {
+  stateTimer += dt;
+  if (state === 'title') {
+    if (keys.boss) {                       // straight to the hot deal
+      keys.boss = false; keys.action = false;
+      newRun(); G.resolved = 1; nextScene(); return;
+    }
+    if (keys.action) { keys.action = false; state='play'; newRun(); }
+    return;
+  }
+  if (state === 'gameover') { if (keys.action && stateTimer > 1.2) { keys.action=false; state='title'; } return; }
+  if (state === 'bossintro') {
+    if (stateTimer > 3.6 || (keys.action && stateTimer > 0.6)) { keys.action=false; state='play'; }
+    return;
+  }
+  if (state === 'dead' || state === 'exit' || state === 'dealwon' || state === 'deallost') {
+    const wait = state==='dead' ? 2.4 : state==='exit' ? 2.8 : 4.2;
+    if (stateTimer > wait || (keys.action && stateTimer > 1.0)) {
+      keys.action = false;
+      if (G.companies <= 0 || G.clock <= 0) { endRun(); }
+      else nextScene();
+    }
+    return;
+  }
+
+  // ---- fund clock
+  G.clock -= dt;
+  G.nextNag -= dt;
+  if (G.nextNag <= 0) {
+    toast('📩 ' + LP_NAGS[G.nagIdx++ % LP_NAGS.length], 2.6);
+    G.nextNag = SECS_PER_YEAR * (1.5 - Math.min(1, (1 - G.clock/(FUND_YEARS*SECS_PER_YEAR))) * 1.1);
+  }
+  if (G.clock <= 0) { G.clock = 0; toast('FUND TERM EXPIRED', 2); endRun(); return; }
+
+  const C = G.company;
+  if (C) { if (C.proRata > 0) C.proRata -= dt; if (C.fees > 0) C.fees -= dt; }
+  if (G.toastT > 0) { G.toastT -= dt; if (G.toastT <= 0) G.toast = null; }
+  if (G.shake > 0) G.shake -= dt;
+
+  // ---- input / physics
+  let ax = 0;
+  if (keys.left)  { ax -= 1; P.dir = -1; }
+  if (keys.right) { ax += 1; P.dir = 1; }
+  P.vx = ax * RUN;
+
+  // conviction jump: tap = small check, hold = big check, harder landing
+  if (keys.jump && P.onGround) {
+    P.vy = JUMP_MIN; P.onGround = false; P.holdT = 0; P.jumpHeld = true; sfx.jump();
+  }
+  if (P.jumpHeld && keys.jump && P.holdT < HOLD_MAX && P.vy < 0) {
+    P.vy += JUMP_HOLD * dt; P.holdT += dt;
+  }
+  if (!keys.jump) P.jumpHeld = false;
+
+  P.vy += GRAV * dt;
+  if (P.vy > 900) P.vy = 900;
+
+  moveAndCollide(dt);
+
+  // conveyor push (demo day belt)
+  {
+    const b = playerBox();
+    const tx = Math.floor((b.x+b.w/2)/TILE), ty = Math.floor((b.y+b.h+2)/TILE);
+    if (P.onGround && tileAt(tx,ty) === 'C') P.x += 55*dt;
+  }
+
+  // fell off the map
+  if (P.y > H + 120) return G.mode === 'boss'
+    ? loseDeal('You fell out of the process.')
+    : killCompany('down round → mark to zero');
+
+  // ---- the boss owns the rest of the frame
+  if (G.mode === 'boss') return updateBoss(dt);
+
+  // ---- secondaries: cash out at 50%, company retired
+  if (keys.sec && C) {
+    keys.sec = false;
+    const v = C.paper * 0.5;
+    G.exits.push(v);
+    toast('SECONDARY: sold at 50% of the mark. ' + fmtM(v) + ' DPI. Coward.', 3);
+    sfx.markup();
+    retireCompany('exit');
+    return;
+  }
+
+  // ---- entities
+  for (const e of ents) {
+    if (e.t === 'coin' && !e.taken) {
+      const b = playerBox();
+      if (rectHit(b.x,b.y,b.w,b.h, e.x-e.r, e.y-e.r, e.r*2, e.r*2)) collect(e);
+    } else if (e.t === 'goomba' && !e.dead) {
+      e.x += e.vx * dt;
+      const etx0 = Math.floor((e.x - e.w/2 - 2)/TILE), etx1 = Math.floor((e.x + e.w/2 + 2)/TILE);
+      const ety = Math.floor(e.y/TILE);
+      const below0 = Math.floor((e.x - e.w/2)/TILE), below1 = Math.floor((e.x + e.w/2)/TILE);
+      const bty = Math.floor((e.y + e.h/2 + 4)/TILE);
+      if (solidFull(tileAt(e.vx<0?etx0:etx1, ety)) ||
+          !solidTop(tileAt(e.vx<0?below0:below1, bty))) e.vx *= -1;
+      const b = playerBox();
+      if (rectHit(b.x,b.y,b.w,b.h, e.x-e.w/2, e.y-e.h/2, e.w, e.h)) {
+        if (P.vy > 150 && b.y + b.h < e.y + 4) { // stomp
+          e.dead = 1; P.vy = -430; sfx.stomp();
+          C.paper += 1; toast('Restructured the round. +$1M mark.', 1.6);
+        } else if (C.fees > 0) {
+          e.dead = 1; sfx.stomp(); // fees make you invincible to consequences
+        } else return killCompany('down round');
+      }
+    } else if (e.t === 'goomba' && e.dead) {
+      e.dead += dt;
+    } else if (e.t === 'founder') {
+      e.pt += dt;
+      e.x = e.baseX + Math.sin(e.pt*0.9)*6;
+    } else if (e.t === 'flag') {
+      const b = playerBox();
+      if (b.x + b.w > e.x - 6) return exitCompany();
+    }
+  }
+}
+
+function moveAndCollide(dt) {
+  const b = playerBox();
+  // horizontal
+  P.x += P.vx * dt;
+  {
+    const nb = playerBox();
+    const ty0 = Math.floor(nb.y/TILE), ty1 = Math.floor((nb.y+nb.h-1)/TILE);
+    if (P.vx > 0) {
+      const tx = Math.floor((nb.x+nb.w)/TILE);
+      for (let ty=ty0; ty<=ty1; ty++) if (solidFull(tileAt(tx,ty))) { P.x = tx*TILE - nb.w/2; break; }
+    } else if (P.vx < 0) {
+      const tx = Math.floor(nb.x/TILE);
+      for (let ty=ty0; ty<=ty1; ty++) if (solidFull(tileAt(tx,ty))) { P.x = (tx+1)*TILE + nb.w/2; break; }
+    }
+  }
+  // vertical
+  const prevFeet = P.y;              // playerBox().y + h === P.y
+  P.y += P.vy * dt;
+  P.onGround = false;
+  {
+    const nb = playerBox();
+    const tx0 = Math.floor((nb.x+2)/TILE), tx1 = Math.floor((nb.x+nb.w-3)/TILE);
+    if (P.vy > 0) {
+      const ty = Math.floor((nb.y+nb.h)/TILE);
+      for (let tx=tx0; tx<=tx1; tx++) {
+        const ch = tileAt(tx,ty);
+        if (!solidTop(ch)) continue;
+        if (ch === '=' && prevFeet > ty*TILE + 2) continue;   // one-way: came from below
+        // conviction landing: big holds land hard
+        if (P.holdT > HOLD_MAX*0.8 && P.vy > 700) G.shake = 0.25;
+        P.y = ty*TILE; P.vy = 0; P.onGround = true; break;
+      }
+    } else if (P.vy < 0) {
+      const ty = Math.floor(nb.y/TILE);
+      for (let tx=tx0; tx<=tx1; tx++) if (solidFull(tileAt(tx,ty))) {
+        P.y = (ty+1)*TILE + nb.h; P.vy = 0; break;
+      }
+    }
+  }
+  // camera
+  const target = P.x - W*0.38;
+  cam.x += (target - cam.x) * Math.min(1, dt*6);
+  cam.x = Math.max(0, Math.min(cam.x, MAP_W*TILE - W));
+}
+
+// ---------------------------------------------------------------- the boss
+// Three ways out of this room: bid him up, go around him, or walk out the door.
+// Two of them are free. The satisfying one is not.
+function updateBoss(dt) {
+  const D = G.deal;
+  if (ents.length > 40) ents = ents.filter(e => !e.gone);
+
+  D.t -= dt;
+  if (D.t <= 0) return loseDeal('The round closed. Nobody called you.');
+
+  const pb = playerBox();
+
+  // the door: you can just walk out. it costs you nothing today.
+  const door = ents.find(e => e.t === 'door');
+  if (door && P.x < door.x + 26 && P.onGround) {   // anywhere in the doorway, incl. flush to the wall
+    D.passT += dt;
+    if (D.passT >= 1.2) return loseDeal('You walked out of the room.', true);
+  } else D.passT = Math.max(0, D.passT - dt*2);
+
+  const b = ents.find(e => e.t === 'boss');
+  if (b && b.defeated) {
+    b.defeated += dt;                                // he concedes and walks
+    b.x += b.face * -90 * dt;
+  } else if (b) {
+    b.face = P.x < b.x ? -1 : 1;
+    if (b.stun > 0) {
+      b.stun -= dt; b.x += b.vx * dt; b.vx *= 0.90;
+    } else if (b.mode === 'walk') {
+      b.x += b.face * 62 * dt;
+      if ((b.timer -= dt) <= 0) { b.mode = 'wind'; b.timer = 0.45;
+                                  b.next = (b.atk++ % 2) ? 'throw' : 'pound'; }
+    } else if (b.mode === 'wind') {
+      if ((b.timer -= dt) <= 0) {
+        if (b.next === 'throw') {                    // pre-empt
+          const dx = P.x - b.x;
+          ents.push({t:'proj', x: b.x + b.face*34, y: b.y - 64,
+                     vx: Math.max(-430, Math.min(430, dx*1.6)), vy: -270});
+          blip(520,.1,'square',.05,240);
+          b.mode = 'walk'; b.timer = 1.5;
+        } else { b.mode = 'pound'; b.vy = -640; }
+      }
+    } else if (b.mode === 'pound') {                 // "we'll lead"
+      b.vy += GRAV*0.85*dt; b.y += b.vy*dt;
+      if (b.y >= b.groundY) {
+        b.y = b.groundY; b.vy = 0; b.mode = 'winded'; b.timer = 2.2;
+        G.shake = 0.3; blip(90,.25,'sawtooth',.07);
+        ents.push({t:'wave', x:b.x, y:b.groundY, vx: 300});
+        ents.push({t:'wave', x:b.x, y:b.groundY, vx:-300});
+      }
+    } else if (b.mode === 'winded') {                // the opening. hit him here.
+      if ((b.timer -= dt) <= 0) { b.mode = 'walk'; b.timer = 1.5; }
+    }
+    b.x = Math.max(TILE*2.5, Math.min(TILE*27, b.x));
+
+    const BW = 66, BH = 100, bx = b.x - BW/2, by = b.y - BH;
+    if (rectHit(pb.x,pb.y,pb.w,pb.h, bx,by,BW,BH)) {
+      if (P.vy > 120 && pb.y + pb.h < by + 34) hitBoss(b);
+      else if (b.stun <= 0 && b.mode !== 'winded') return loseDeal('He ran you over. Politely.');
+    }
+  }
+
+  for (const e of ents) {
+    if (e.gone) continue;
+    if (e.t === 'proj') {
+      e.vy += GRAV*0.55*dt; e.x += e.vx*dt; e.y += e.vy*dt;
+      if (e.y > H + 80 || e.x < -60 || e.x > MAP_W*TILE + 60) e.gone = true;
+      else if (rectHit(pb.x,pb.y,pb.w,pb.h, e.x-9,e.y-11,18,22))
+        return loseDeal('Pre-empted. Signed before you landed.');
+    } else if (e.t === 'wave') {
+      e.x += e.vx*dt;
+      if (e.x < -60 || e.x > MAP_W*TILE + 60) e.gone = true;
+      else if (rectHit(pb.x,pb.y,pb.w,pb.h, e.x-16,e.y-22,32,22))
+        return loseDeal('"We can move faster than you."');
+    } else if (e.t === 'float') {
+      e.y -= 46*dt; if ((e.life -= dt) <= 0) e.gone = true;
+    } else if (e.t === 'flag') {
+      if (pb.x + pb.w > e.x - 6) return winHotDeal();   // the gate is open. sign it.
+    }
+  }
+}
+
+// Three hits and he's out. What each hit COSTS is the whole game:
+// catch him winded and it's free; jump on him any other time and you just bid.
+function hitBoss(b) {
+  const D = G.deal;
+  const free = b.mode === 'winded';
+  b.hp--; D.hp = b.hp;
+  b.stun = 0.95; b.vx = (P.x < b.x ? 1 : -1) * 340;
+  b.mode = 'walk'; b.timer = 1.5;      // he recomposes — one free hit per opening
+  P.vy = -470; G.shake = 0.18;
+
+  if (free) {
+    D.free++;
+    sfx.stomp();
+    ents.push({t:'float', x: b.x + 58, y: b.y - 104, txt: 'FREE', life: 1.1, col:'#59d68f'});
+    toast('HE BLINKED. No markup.', 1.6);
+  } else {
+    D.bids++; D.val += BID_STEP;
+    sfx.markup();
+    ents.push({t:'float', x: b.x + 58, y: b.y - 104, txt: '+' + fmtM(BID_STEP), life: 1.1});
+    toast(BID_BARKS[(D.bids-1) % BID_BARKS.length] + '  Post-money ' + fmtM(D.val) + '.', 1.6);
+  }
+
+  if (b.hp <= 0) {
+    b.defeated = 0.001; gateOpen = true;
+    sfx.exit();
+    toast('"We\'re out at this price." THE SIGNING WINDOW IS OPEN.', 3);
+  }
+}
+
+function winHotDeal() {
+  const D = G.deal;
+  G.lastHot = G.pendingHot = {
+    name: D.name, pitch: D.pitch, val: D.val, bids: D.bids, free: D.free,
+    mult: HOT_TARGET / D.val,          // you own less, so you make less
+    own:  CHECK / D.val * 100,
+  };
+  sfx.exit();
+  state = 'dealwon'; stateTimer = 0;
+}
+
+function loseDeal(reason, passed) {
+  const D = G.deal;
+  G.antiPortfolio.push({ name: D.name, pitch: D.pitch, passed: !!passed,
+                         mark: 1400 + Math.random()*2600 });
+  G.lastDealReason = reason; G.lastDealPassed = !!passed;
+  sfx.death();
+  state = 'deallost'; stateTimer = 0;
+}
+
+// ---------------------------------------------------------------- economy
+function collect(e) {
+  const C = G.company;
+  if (e.kind === 'seat') {
+    e.taken = true; G.companies++; sfx.seat();
+    toast('BOARD SEAT — one more company in the portfolio.', 2.4); return;
+  }
+  if (e.kind === 'prorata') {
+    e.taken = true; C.proRata = 9; P.scale = Math.min(1, P.scale/DILUTE); sfx.seat();
+    toast('PRO RATA — ownership defended. Marks 2x for 9s.', 2.4); return;
+  }
+  if (e.kind === 'fees') {
+    e.taken = true; C.fees = 7; sfx.seat();
+    toast('2 AND 20 — fees keep you alive regardless of performance.', 2.6); return;
+  }
+  // term sheets / SAFEs: follow-on pricing — later rounds cost reserves per coin
+  const cost = FOLLOWON_COST[Math.min(C.round, FOLLOWON_COST.length-1)];
+  if (cost > 0) {
+    if (G.reserves < cost) {
+      if (!e.denied) { e.denied = true; sfx.denied();
+        toast('NO RESERVES — you cannot follow on. (You blew it at seed.)', 2.6); }
+      return; // coin stays. you just can't have it.
+    }
+    G.reserves -= cost;
+    G.followOnSpent += cost;
+  }
+  e.taken = true;
+  // up rounds mark harder; a hot deal you got cheap marks hardest of all
+  const mult = (C.proRata > 0 ? 2 : 1) * (1 + C.round * 0.6) * (C.mult || 1);
+  C.paper += e.val * mult;
+  C.roundCoins++;
+  sfx.coin();
+  if (C.roundCoins >= ROUND_SIZE && C.round < ROUND_NAMES.length-1) {
+    C.round++; C.roundCoins = 0;
+    P.scale *= DILUTE; // dilution
+    sfx.markup();
+    const nextCost = FOLLOWON_COST[Math.min(C.round, FOLLOWON_COST.length-1)];
+    toast(ROUND_NAMES[C.round] + ' closed! Marked up. You own less. ' +
+          'Follow-ons now $' + nextCost + 'M each.', 3);
+  }
+}
+
+function killCompany(why) {
+  if (G.mode === 'boss') return loseDeal(why);
+  const C = G.company;
+  G.deadPaper += C.paper;
+  G.companies--; G.resolved++;
+  G.lastPass = PASS_LINES[(Math.random()*PASS_LINES.length)|0];
+  G.lastWhy = why;
+  sfx.death();
+  state = 'dead'; stateTimer = 0;
+}
+function exitCompany() {
+  const C = G.company;
+  G.exits.push(C.paper);
+  G.lastExit = C.paper;
+  sfx.exit();
+  retireCompany('exit');
+}
+function retireCompany(mode) {
+  G.companies--; G.resolved++;
+  state = mode; stateTimer = 0;
+}
+function endRun() { state = 'gameover'; stateTimer = 0; }
+
+// grade: power law — only your best exit matters
+function grade() {
+  const best = bestExit() / CHECK; // multiple on the check
+  const dpi = dpiVal();
+  if (best >= 15 && dpi >= 1.5) return ['TOP DECILE', 'LPs return your calls first. Fund II is oversubscribed.'];
+  if (best >= 8)  return ['FIRST QUARTILE', 'One company carried the fund. It always does.'];
+  if (best >= 4)  return ['SECOND QUARTILE', 'Respectable. The word "solid" will haunt you.'];
+  if (best >= 1.5) return ['THIRD QUARTILE', 'You will raise Fund III anyway.'];
+  return ['FOURTH QUARTILE', 'Your TVPI was beautiful. Nobody could eat it.'];
+}
+
+// ---------------------------------------------------------------- render
+function render(dt) {
+  ctx.save();
+  ctx.fillStyle = '#0d0f1a'; ctx.fillRect(0,0,W,H);
+
+  if (state === 'title') return renderTitle();
+  if (state === 'gameover') { ctx.restore(); return renderGameOver(); }
+
+  if (G.shake > 0) ctx.translate((Math.random()-0.5)*8, (Math.random()-0.5)*8);
+
+  // sky gradient + skyline
+  const grad = ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,'#1a2340'); grad.addColorStop(1,'#2b2352');
+  ctx.fillStyle = grad; ctx.fillRect(0,0,W,H);
+  drawSkyline();
+
+  ctx.save();
+  ctx.translate(-Math.round(cam.x), 0);
+  drawTiles();
+  drawEnts();
+  if (state !== 'dead') drawPlayer();
+  ctx.restore();
+
+  drawHUD();
+
+  if (state === 'dead') drawDeathCard();
+  if (state === 'exit') drawExitCard();
+  if (state === 'bossintro') drawBossIntro();
+  if (state === 'dealwon') drawDealWon();
+  if (state === 'deallost') drawDealLost();
+  ctx.restore();
+}
+
+function drawBossIntro() {
+  ctx.fillStyle = 'rgba(13,15,26,0.88)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd75e'; ctx.font = 'bold 32px monospace';
+  ctx.fillText('A HOT DEAL', W/2, H/2 - 78);
+  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 21px monospace';
+  ctx.fillText(G.deal.name + ' — ' + G.deal.pitch, W/2, H/2 - 34);
+  ctx.fillStyle = '#b8b4cc'; ctx.font = '15px monospace';
+  ctx.fillText('Everyone is in it. 48 hours to sign.', W/2, H/2 + 2);
+  ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 17px monospace';
+  ctx.fillText('TIER 1 VC is standing in front of the signature.', W/2, H/2 + 38);
+  ctx.fillStyle = '#6a677f'; ctx.font = '13px monospace';
+  ctx.fillText('Three hits and he walks. Every hit you land is a bid —', W/2, H/2 + 68);
+  ctx.fillText('unless you catch him winded.', W/2, H/2 + 88);
+}
+
+function drawDealWon() {
+  const h = G.lastHot;
+  ctx.fillStyle = 'rgba(13,15,26,0.88)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd75e'; ctx.font = 'bold 33px monospace';
+  ctx.fillText('YOU WON THE HOT DEAL', W/2, H/2 - 84);
+  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 20px monospace';
+  ctx.fillText(h.name, W/2, H/2 - 48);
+  ctx.font = '15px monospace'; ctx.fillStyle = '#b8b4cc';
+  ctx.fillText('Entry ' + fmtM(h.val) + ' post   ·   ' + h.bids + ' bid' +
+               (h.bids === 1 ? '' : 's') + ', ' + h.free + ' free', W/2, H/2 - 16);
+  ctx.font = 'bold 24px monospace';
+  ctx.fillStyle = h.own >= 12 ? '#59d68f' : h.own >= 6 ? '#ffd75e' : '#ff6b81';
+  ctx.fillText('You own ' + h.own.toFixed(1) + '%', W/2, H/2 + 24);
+  ctx.font = '14px monospace'; ctx.fillStyle = '#6a677f';
+  ctx.fillText(h.bids === 0
+    ? 'You beat him without bidding once. This one can return the fund.'
+    : h.bids <= 2 ? 'You paid up a little. It can still work.'
+    : h.bids <= 4 ? 'You will need a ' + fmtM(h.val*10) + ' outcome to care about this.'
+    : 'Congratulations. You bought a very expensive average company.', W/2, H/2 + 58);
+}
+
+function drawDealLost() {
+  const a = G.antiPortfolio[G.antiPortfolio.length-1];
+  ctx.fillStyle = 'rgba(13,15,26,0.88)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = G.lastDealPassed ? '#b8b4cc' : '#ff6b81';
+  ctx.font = 'bold 29px monospace';
+  ctx.fillText(G.lastDealPassed ? 'YOU PASSED' : 'YOU LOST THE DEAL', W/2, H/2 - 52);
+  ctx.fillStyle = '#e8e6f0'; ctx.font = '16px monospace';
+  ctx.fillText(G.lastDealReason, W/2, H/2 - 14);
+  ctx.fillStyle = '#6a677f'; ctx.font = '14px monospace';
+  ctx.fillText(a.name + ' goes to the anti-portfolio.', W/2, H/2 + 22);
+  ctx.fillText('Costs you nothing today.', W/2, H/2 + 46);
+}
+
+function drawSkyline() {
+  ctx.fillStyle = '#141a30';
+  for (let i = 0; i < 22; i++) {
+    const x = ((i*137 - cam.x*0.25) % (W+200)) - 100;
+    const h = 60 + (i*53)%140;
+    ctx.fillRect(x, H-120-h, 54, h+40);
+  }
+  // sand hill road sign vibes
+  ctx.fillStyle = '#0f1426';
+  for (let i = 0; i < 14; i++) {
+    const x = ((i*211 - cam.x*0.5) % (W+300)) - 150;
+    const h = 40 + (i*97)%90;
+    ctx.fillRect(x, H-90-h, 80, h+30);
+  }
+}
+
+function drawTiles() {
+  const tx0 = Math.floor(cam.x/TILE), tx1 = Math.ceil((cam.x+W)/TILE);
+  for (let ty = 0; ty < MAP_H; ty++) for (let tx = tx0; tx <= tx1; tx++) {
+    const ch = tileAt(tx,ty), x = tx*TILE, y = ty*TILE;
+    if (ch === '#') {
+      ctx.fillStyle = '#3d3554'; ctx.fillRect(x,y,TILE,TILE);
+      ctx.fillStyle = '#584d78'; ctx.fillRect(x,y,TILE,5);
+      ctx.fillStyle = '#332c47'; ctx.fillRect(x+2,y+9,TILE-4,2);
+    } else if (ch === '=') {
+      ctx.fillStyle = '#6b5a2e'; ctx.fillRect(x,y+4,TILE,14);
+      ctx.fillStyle = '#9c8348'; ctx.fillRect(x,y+4,TILE,4);
+    } else if (ch === 'G' && !gateOpen) {
+      ctx.fillStyle = '#2a2136'; ctx.fillRect(x,y,TILE,TILE);
+      ctx.fillStyle = '#4a3a5e'; ctx.fillRect(x+3,y+3,TILE-6,TILE-6);
+      ctx.fillStyle = '#2a2136'; ctx.fillRect(x+3,y+16,TILE-6,4);
+    } else if (ch === 'C') {
+      ctx.fillStyle = '#22314f'; ctx.fillRect(x,y,TILE,TILE);
+      ctx.fillStyle = '#3f5c8f';
+      const off = (performance.now()/12) % TILE;
+      for (let i=-1;i<3;i++) ctx.fillRect(x + ((i*14+off)%TILE+TILE)%TILE, y+2, 7, 4);
+      ctx.fillStyle = '#584d78'; ctx.fillRect(x,y,TILE,2);
+    }
+  }
+}
+
+function drawEnts() {
+  const t = performance.now()/1000;
+  for (const e of ents) {
+    if (e.t === 'coin' && !e.taken) {
+      const bob = Math.sin(t*3 + e.x)*3;
+      if (e.kind === 'term' || e.kind === 'safe' || e.kind === 'uncapped') {
+        // a little document
+        const w = e.r*1.6, h = e.r*2;
+        ctx.save(); ctx.translate(e.x, e.y+bob);
+        ctx.fillStyle = e.kind==='uncapped' ? '#ffd75e' : '#e8e6f0';
+        ctx.fillRect(-w/2,-h/2,w,h);
+        ctx.fillStyle = e.kind==='uncapped' ? '#8f6b00' : '#8a86a3';
+        for (let i=0;i<3;i++) ctx.fillRect(-w/2+3, -h/2+4+i*5, w-6, 2);
+        if (e.kind==='uncapped'){ ctx.fillStyle='#8f6b00'; ctx.font='bold 9px monospace';
+          ctx.textAlign='center'; ctx.fillText('∞', 0, h/2-3); }
+        ctx.restore();
+      } else if (e.kind === 'seat') {
+        ctx.save(); ctx.translate(e.x, e.y+bob);
+        ctx.fillStyle = '#7ec8a9'; ctx.fillRect(-9,-4,18,5);   // seat
+        ctx.fillRect(-9,-14,4,11); ctx.fillRect(-9,1,3,8); ctx.fillRect(6,1,3,8);
+        ctx.restore();
+      } else if (e.kind === 'prorata') {
+        ctx.save(); ctx.translate(e.x, e.y+bob);
+        ctx.fillStyle = '#9ecbff'; ctx.beginPath();
+        ctx.moveTo(0,-11); ctx.lineTo(10,4); ctx.lineTo(-10,4); ctx.closePath(); ctx.fill();
+        ctx.fillStyle='#1a2340'; ctx.font='bold 10px monospace'; ctx.textAlign='center';
+        ctx.fillText('%', 0, 2);
+        ctx.restore();
+      } else if (e.kind === 'fees') {
+        ctx.save(); ctx.translate(e.x, e.y+bob);
+        ctx.fillStyle = '#ff8db1'; ctx.beginPath(); ctx.arc(0,-3,10,Math.PI,0); ctx.fill();
+        ctx.fillStyle = '#f5edd8'; ctx.fillRect(-4,-3,8,8);
+        ctx.fillStyle = '#1a2340'; ctx.font='bold 8px monospace'; ctx.textAlign='center';
+        ctx.fillText('2/20', 0, -5);
+        ctx.restore();
+      }
+    } else if (e.t === 'goomba') {
+      if (e.dead && e.dead > 0.4) continue;
+      ctx.save(); ctx.translate(e.x, e.y);
+      if (e.dead) ctx.scale(1, 0.4);
+      // a little chart trending down
+      ctx.fillStyle = '#c0455a'; ctx.fillRect(-13,-13,26,26);
+      ctx.strokeStyle = '#ffd9df'; ctx.lineWidth = 2; ctx.beginPath();
+      ctx.moveTo(-9,-6); ctx.lineTo(-2,0); ctx.lineTo(2,-3); ctx.lineTo(9,8); ctx.stroke();
+      ctx.fillStyle = '#2b1220';
+      ctx.fillRect(-8,4,4,4); ctx.fillRect(4,4,4,4);
+      ctx.restore();
+    } else if (e.t === 'founder') {
+      ctx.save(); ctx.translate(e.x, e.y);
+      ctx.fillStyle = '#c9b089'; ctx.fillRect(-5,-24,10,9);          // head
+      ctx.fillStyle = '#39415e'; ctx.fillRect(-7,-15,14,15);         // patagonia vest
+      ctx.fillStyle = '#8d94ad'; ctx.fillRect(-7,-15,3,15); ctx.fillRect(4,-15,3,15);
+      // pitch bubble: rotates every 4 seconds, like the spec says
+      const idx = (Math.floor(performance.now()/4000) + e.pitch) % FOUNDER_PITCHES.length;
+      ctx.font = '10px monospace'; ctx.textAlign = 'center';
+      const msg = '"' + FOUNDER_PITCHES[idx] + '"';
+      const tw = ctx.measureText(msg).width + 10;
+      ctx.fillStyle = 'rgba(232,230,240,0.92)';
+      ctx.fillRect(-tw/2, -46, tw, 15);
+      ctx.fillStyle = '#1a2340'; ctx.fillText(msg, 0, -35);
+      ctx.restore();
+    } else if (e.t === 'boss') {
+      if (e.defeated > 0.9) continue;
+      const hit = e.stun > 0 && Math.floor(performance.now()/70)%2 === 0;
+      const open = e.mode === 'winded' && !e.defeated;
+      ctx.save(); ctx.translate(e.x, e.y);
+      if (e.defeated) { ctx.globalAlpha = Math.max(0, 1 - e.defeated); ctx.scale(1, 0.94); }
+      if (open) {                                   // hunched — this is the opening
+        ctx.scale(1, 0.86);
+        ctx.strokeStyle = 'rgba(89,214,143,' + (0.5+0.5*Math.sin(performance.now()/120)).toFixed(2) + ')';
+        ctx.lineWidth = 3; ctx.strokeRect(-36,-118,72,118);
+      }
+      ctx.save(); ctx.scale(e.face, 1);
+      // the shell: a stack of everyone else's term sheets
+      ctx.fillStyle = '#cfcbdd';
+      for (let i=0;i<5;i++) ctx.fillRect(-50, -82 + i*14, 26, 12);
+      ctx.fillStyle = '#8a86a3';
+      for (let i=0;i<5;i++) ctx.fillRect(-46, -78 + i*14, 18, 2);
+      ctx.restore();
+      ctx.fillStyle = '#20263a'; ctx.fillRect(-26,-30,20,30); ctx.fillRect(6,-30,20,30);
+      ctx.fillStyle = '#f0ede4'; ctx.fillRect(-28,-7,22,7); ctx.fillRect(4,-7,22,7);
+      ctx.fillStyle = hit ? '#8ea3c9' : '#141d33'; ctx.fillRect(-30,-78,60,50);  // the vest, enormous
+      ctx.fillStyle = '#6f87b8'; ctx.fillRect(-32,-86,64,9);                     // popped collar
+      ctx.fillStyle = '#243357'; ctx.fillRect(-3,-78,6,50);
+      ctx.fillStyle = '#6f87b8'; ctx.fillRect(-40,-76,10,34); ctx.fillRect(30,-76,10,34);
+      ctx.fillStyle = '#d4af37'; ctx.beginPath(); ctx.arc(0,-58,11,0,7); ctx.fill();
+      ctx.fillStyle = '#141d33'; ctx.beginPath();
+      ctx.moveTo(0,-65); ctx.lineTo(6,-58); ctx.lineTo(0,-51); ctx.lineTo(-6,-58);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#dbb894'; ctx.fillRect(-13,-110,26,24);
+      ctx.fillStyle = '#b8b4cc'; ctx.fillRect(-15,-114,30,7);                    // silver hair
+      ctx.fillStyle = '#0d0f1a'; ctx.fillRect(-11,-103,22,5);                    // glasses
+      ctx.restore();
+      ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center';
+      if (e.defeated) { ctx.fillStyle = '#6a677f'; ctx.fillText('...', e.x, e.y - 126); }
+      else if (e.mode === 'winded') { ctx.fillStyle = '#59d68f'; ctx.fillText('WINDED', e.x, e.y - 126); }
+      else { ctx.fillStyle = '#d4af37'; ctx.fillText('TIER 1 VC', e.x, e.y - 126); }
+    } else if (e.t === 'proj' && !e.gone) {
+      ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(performance.now()/90);
+      ctx.fillStyle = '#ffd75e'; ctx.fillRect(-8,-11,16,22);
+      ctx.fillStyle = '#8f6b00';
+      for (let i=0;i<3;i++) ctx.fillRect(-5,-7+i*5,10,2);
+      ctx.restore();
+    } else if (e.t === 'wave' && !e.gone) {
+      ctx.fillStyle = 'rgba(212,175,55,0.8)';
+      ctx.beginPath(); ctx.moveTo(e.x-16, e.y); ctx.lineTo(e.x, e.y-22);
+      ctx.lineTo(e.x+16, e.y); ctx.closePath(); ctx.fill();
+    } else if (e.t === 'float' && !e.gone) {
+      ctx.globalAlpha = Math.min(1, e.life*2);
+      ctx.font = 'bold 20px monospace'; ctx.textAlign = 'center';
+      ctx.fillStyle = e.col || '#ffd75e'; ctx.fillText(e.txt, e.x, e.y);
+      ctx.globalAlpha = 1;
+    } else if (e.t === 'door') {
+      ctx.fillStyle = '#1b2036'; ctx.fillRect(e.x-22, e.y-62, 44, 62);
+      ctx.fillStyle = '#39415e'; ctx.fillRect(e.x-18, e.y-56, 36, 56);
+      ctx.fillStyle = '#b8b4cc'; ctx.font = 'bold 11px monospace'; ctx.textAlign='center';
+      ctx.fillText('PASS', e.x, e.y-30);
+      if (G.deal && G.deal.passT > 0) {
+        ctx.fillStyle = '#2b2840'; ctx.fillRect(e.x-24, e.y-78, 48, 7);
+        ctx.fillStyle = '#ffd75e';
+        ctx.fillRect(e.x-24, e.y-78, 48*Math.min(1, G.deal.passT/1.2), 7);
+      }
+    } else if (e.t === 'hotdeal') {
+      const g = 0.5 + 0.5*Math.sin(performance.now()/200);
+      ctx.save(); ctx.translate(e.x, e.y);
+      ctx.fillStyle = 'rgba(255,215,94,' + (0.10 + g*0.14).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(0,-24, 36 + g*7, 0, 7); ctx.fill();
+      ctx.fillStyle = '#c9b089'; ctx.fillRect(-6,-40,12,11);
+      ctx.fillStyle = '#39415e'; ctx.fillRect(-8,-29,16,18);
+      ctx.fillStyle = '#8d94ad'; ctx.fillRect(-8,-29,3,18); ctx.fillRect(5,-29,3,18);
+      ctx.fillStyle = '#b0996b'; ctx.fillRect(-7,-11,6,11); ctx.fillRect(1,-11,6,11);
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#ffd75e';
+      ctx.fillText(G.deal.name, 0, -62);
+      ctx.font = '10px monospace'; ctx.fillStyle = '#b8b4cc';
+      ctx.fillText('"' + G.deal.pitch + '"', 0, -49);
+      ctx.restore();
+    } else if (e.t === 'flag') {
+      ctx.save(); ctx.translate(e.x, 0);
+      ctx.fillStyle = '#b8b4cc'; ctx.fillRect(-2, TILE*4.2, 4, TILE*5.8);
+      ctx.fillStyle = '#59d68f'; ctx.beginPath();
+      ctx.moveTo(2, TILE*4.2); ctx.lineTo(46, TILE*4.7); ctx.lineTo(2, TILE*5.2);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#0d2b1c'; ctx.font = 'bold 10px monospace'; ctx.textAlign='left';
+      ctx.fillText('IPO', 8, TILE*4.85);
+      ctx.restore();
+    }
+  }
+}
+
+function drawPlayer() {
+  const s = P.scale;
+  ctx.save();
+  ctx.translate(P.x, P.y);
+  ctx.scale(P.dir * s, s);
+  // the VC: navy fleece vest over blue oxford, khakis
+  ctx.fillStyle = '#e3c29e'; ctx.fillRect(-7,-34,14,10);      // head
+  ctx.fillStyle = '#2b2b33'; ctx.fillRect(-7,-36,14,4);       // hair
+  ctx.fillStyle = '#6f87b8'; ctx.fillRect(-9,-24,18,7);       // oxford
+  ctx.fillStyle = '#1f2d4d'; ctx.fillRect(-9,-19,18,11);      // THE VEST
+  ctx.fillStyle = '#31436b'; ctx.fillRect(-2,-19,4,11);       // zipper
+  ctx.fillStyle = '#b0996b'; ctx.fillRect(-8,-8,7,8); ctx.fillRect(1,-8,7,8); // khakis
+  ctx.fillStyle = '#f0ede4'; ctx.fillRect(-9,-1,8,3); ctx.fillRect(1,-1,8,3); // allbirds
+  // face
+  ctx.fillStyle = '#1a1a22'; ctx.fillRect(2,-31,2,2);
+  if (G.company && G.company.fees > 0) { // fee halo
+    ctx.strokeStyle = 'rgba(255,141,177,0.7)'; ctx.lineWidth = 2;
+    ctx.strokeRect(-12,-38,24,42);
+  }
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- HUD
+function drawHUD() {
+  const C = G.company;
+  ctx.textAlign = 'left';
+
+  // TVPI — huge, glorious, fake
+  const tv = tvpiVal();
+  ctx.font = 'bold 34px monospace';
+  ctx.fillStyle = tv >= 1 ? '#59d68f' : '#e8e6f0';
+  ctx.fillText('TVPI ' + tv.toFixed(2) + 'x', 20, 44);
+  // DPI — small, honest
+  const dp = dpiVal();
+  ctx.font = '13px monospace';
+  ctx.fillStyle = dp > 0 ? '#9ecbff' : '#6a677f';
+  ctx.fillText('DPI ' + dp.toFixed(2) + 'x' + (dp === 0 ? '  (this is the real one)' : ''), 22, 64);
+
+  // portfolio dots
+  ctx.font = '12px monospace'; ctx.fillStyle = '#b8b4cc';
+  ctx.fillText('PORTFOLIO', 20, 90);
+  for (let i = 0; i < 10; i++) {
+    const alive = i < G.companies;
+    ctx.fillStyle = alive ? '#59d68f' : '#43405c';
+    ctx.beginPath(); ctx.arc(100 + i*16, 86, 5, 0, 7); ctx.fill();
+    if (!alive) { ctx.strokeStyle='#2b2840'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(96+i*16,82); ctx.lineTo(104+i*16,90);
+      ctx.moveTo(104+i*16,82); ctx.lineTo(96+i*16,90); ctx.stroke(); }
+  }
+
+  // reserves + current company
+  ctx.fillStyle = '#b8b4cc'; ctx.font = '12px monospace';
+  ctx.fillText('RESERVES ' + fmtM(G.reserves), 20, 112);
+  if (C) {
+    ctx.fillText('CO. #' + G.companyIdx + '  ' + (C.hot ? C.hot + '  ' : '') +
+      ROUND_NAMES[C.round] +
+      '  mark ' + fmtM(C.paper) + (C.proRata>0?'  [PRO RATA]':''), 20, 130);
+  } else {
+    ctx.fillStyle = '#ffd75e'; ctx.fillText('IN A PROCESS', 20, 130);
+  }
+
+  // fund clock — top right, escalating dread
+  const yrsLeft = G.clock / SECS_PER_YEAR;
+  const yr = FUND_YEARS - yrsLeft;
+  ctx.textAlign = 'right';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillStyle = yrsLeft < 2 ? '#ff6b81' : yrsLeft < 4 ? '#ffd75e' : '#b8b4cc';
+  ctx.fillText('FUND YEAR ' + Math.min(10, Math.floor(yr)+1) + '/10', W-20, 38);
+  // clock bar
+  ctx.fillStyle = '#2b2840'; ctx.fillRect(W-220, 48, 200, 8);
+  ctx.fillStyle = yrsLeft < 2 ? '#ff6b81' : '#59d68f';
+  ctx.fillRect(W-220, 48, 200 * (G.clock/(FUND_YEARS*SECS_PER_YEAR)), 8);
+  ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
+  if (G.mode === 'boss') {
+    ctx.fillStyle = G.deal.t < 12 ? '#ff6b81' : '#6a677f';
+    ctx.fillText('48 HOURS TO SIGN: ' + Math.ceil(G.deal.t), W-20, 72);
+    ctx.fillStyle = '#6a677f';
+    ctx.fillText('the door is behind you', W-20, 90);
+  } else {
+    ctx.fillText('best exit: ' + (G.exits.length ? fmtM(bestExit()) : '—'), W-20, 72);
+    ctx.fillText('[X] secondary (coward\'s button)', W-20, 90);
+  }
+
+  // the boss meter: it fills instead of emptying, because it is the price
+  if (G.mode === 'boss') {
+    const D = G.deal;
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 12px monospace'; ctx.fillStyle = '#b8b4cc';
+    ctx.fillText('THE HOT DEAL', W/2, 106);
+    const frac = Math.min(1, (D.val - HOT_ENTRY) / (420 - HOT_ENTRY));
+    ctx.fillStyle = '#2b2840'; ctx.fillRect(W/2-170, 114, 340, 13);
+    ctx.fillStyle = D.val > 240 ? '#ff6b81' : '#d4af37';
+    ctx.fillRect(W/2-170, 114, 340*frac, 13);
+    ctx.strokeStyle = '#584d78'; ctx.lineWidth = 1; ctx.strokeRect(W/2-170, 114, 340, 13);
+    ctx.font = 'bold 17px monospace'; ctx.fillStyle = '#ffd75e';
+    ctx.fillText('POST-MONEY ' + fmtM(D.val), W/2, 146);
+    ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
+    ctx.fillText('your $10M buys ' + (CHECK/D.val*100).toFixed(1) + '%', W/2, 162);
+    // his conviction: three hits and he walks
+    const bs = ents.find(e => e.t === 'boss');
+    const hp = bs ? Math.max(0, bs.hp) : 0;
+    ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
+    ctx.fillText('HIS CONVICTION', W/2 - 46, 180);
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = i < hp ? '#ff6b81' : '#39304a';
+      ctx.beginPath(); ctx.arc(W/2 + 22 + i*16, 176, 5, 0, 7); ctx.fill();
+    }
+  }
+
+  // toast
+  if (G.toast) {
+    ctx.textAlign = 'center'; ctx.font = 'bold 15px monospace';
+    const tw = ctx.measureText(G.toast).width + 30;
+    ctx.fillStyle = 'rgba(13,15,26,0.85)';
+    ctx.fillRect(W/2 - tw/2, H-78, tw, 34);
+    ctx.fillStyle = '#ffd75e';
+    ctx.fillText(G.toast, W/2, H-56);
+  }
+}
+
+function drawDeathCard() {
+  ctx.fillStyle = 'rgba(13,15,26,0.82)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 26px monospace';
+  ctx.fillText('COMPANY #' + G.companyIdx + ' — MARKED TO ZERO', W/2, H/2 - 40);
+  ctx.font = '17px monospace'; ctx.fillStyle = '#b8b4cc';
+  ctx.fillText(G.lastPass, W/2, H/2 + 4);
+  ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
+  ctx.fillText('This is fine. Nine of them are supposed to die.', W/2, H/2 + 36);
+  ctx.fillText(G.companies + ' companies remaining', W/2, H/2 + 58);
+}
+
+function drawExitCard() {
+  ctx.fillStyle = 'rgba(13,15,26,0.82)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#59d68f'; ctx.font = 'bold 30px monospace';
+  ctx.fillText('EXIT: ' + fmtM(G.exits[G.exits.length-1]), W/2, H/2 - 30);
+  ctx.font = '15px monospace'; ctx.fillStyle = '#e8e6f0';
+  ctx.fillText('Actual cash. DPI moves. LPs feel something.', W/2, H/2 + 8);
+  ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
+  ctx.fillText((bestExit() === G.exits[G.exits.length-1] ? 'New best exit. ' : '') +
+    'Only your best one counts.', W/2, H/2 + 34);
+}
+
+// ---------------------------------------------------------------- screens
+function renderTitle() {
+  ctx.fillStyle = '#0d0f1a'; ctx.fillRect(0,0,W,H);
+  const t = performance.now()/1000;
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 52px monospace';
+  ctx.fillStyle = '#59d68f';
+  ctx.fillText('SUPER CARRY BROS.', W/2, 150 + Math.sin(t*2)*4);
+  ctx.font = '16px monospace'; ctx.fillStyle = '#b8b4cc';
+  ctx.fillText('A power-law platformer. Nine of your companies are supposed to die.', W/2, 195);
+  ctx.fillStyle = '#e8e6f0'; ctx.font = '14px monospace';
+  const lines = [
+    '←/→ or A/D ......... move',
+    'SPACE (hold) ....... conviction jump — bigger check, harder landing',
+    'X .................. secondary sale (cash out at 50%, forever ashamed)',
+    '',
+    'Collect term sheets to mark up your company. Reach the IPO flag to',
+    'realize it. TVPI is the big number. DPI is the only number.',
+  ];
+  lines.forEach((l,i)=>ctx.fillText(l, W/2, 260 + i*24));
+  ctx.fillStyle = Math.sin(t*5)>0 ? '#ffd75e' : '#6a677f';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('PRESS SPACE TO DEPLOY CAPITAL', W/2, 448);
+  ctx.fillStyle = '#6a677f'; ctx.font = '13px monospace';
+  ctx.fillText('[B] skip straight to the hot deal', W/2, 478);
+  ctx.restore();
+}
+
+function renderGameOver() {
+  ctx.save();
+  ctx.fillStyle = '#0d0f1a'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+  const [q, tag] = grade();
+  ctx.font = 'bold 22px monospace'; ctx.fillStyle = '#b8b4cc';
+  ctx.fillText('FUND I — FINAL', W/2, 90);
+
+  // the reveal: TVPI vs DPI, side by side
+  const tv = tvpiVal(), dp = dpiVal();
+  ctx.font = 'bold 40px monospace';
+  ctx.fillStyle = '#6a677f';
+  ctx.fillText('TVPI ' + tv.toFixed(2) + 'x', W/2 - 180, 170);
+  ctx.fillStyle = dp >= 1 ? '#59d68f' : '#ff6b81';
+  ctx.fillText('DPI ' + dp.toFixed(2) + 'x', W/2 + 180, 170);
+  ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
+  ctx.fillText('(paper)', W/2 - 180, 195);
+  ctx.fillText('(what LPs can eat)', W/2 + 180, 195);
+
+  ctx.font = '15px monospace'; ctx.fillStyle = '#e8e6f0';
+  ctx.fillText('Best exit: ' + (G.exits.length ? fmtM(bestExit()) : 'none') +
+    '   Exits: ' + G.exits.length + '   Written off: ' + fmtM(G.deadPaper), W/2, 245);
+
+  ctx.font = 'bold 34px monospace'; ctx.fillStyle = '#ffd75e';
+  ctx.fillText(q, W/2, 310);
+  ctx.font = '16px monospace'; ctx.fillStyle = '#b8b4cc';
+  ctx.fillText(tag, W/2, 345);
+
+  // the ones you didn't get. they did fine.
+  if (G.antiPortfolio.length) {
+    const w = G.antiPortfolio.reduce((a,b) => b.mark > a.mark ? b : a);
+    ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
+    ctx.fillText('ANTI-PORTFOLIO: ' + w.name + ' last marked at ' + fmtM(w.mark) + '.', W/2, 385);
+  }
+
+  ctx.font = 'bold 16px monospace';
+  ctx.fillStyle = Math.sin(performance.now()/200)>0 ? '#ffd75e' : '#6a677f';
+  ctx.fillText('PRESS SPACE TO RAISE ANOTHER FUND', W/2, 440);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- input
+addEventListener('keydown', e => {
+  if (e.repeat) return;
+  if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+    keys.jump = true; keys.action = true; e.preventDefault();
+  }
+  if (e.code === 'KeyX') keys.sec = true;
+  if (e.code === 'KeyB') keys.boss = true;
+});
+addEventListener('keyup', e => {
+  if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') keys.jump = false;
+});
+
+state = 'title';
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
