@@ -66,7 +66,7 @@ const LP_NAGS = [
 // Every hit you land is a bid. You can absolutely beat him. That's the trap.
 const HOT_ENTRY  = 60;    // $60M post if you never bid
 const BID_STEP   = 45;    // what one satisfying stomp costs you
-const HOT_TARGET = 240;   // mark multiplier = HOT_TARGET / post-money
+const HOT_TARGET = 380;   // mark multiplier = HOT_TARGET / post-money
 const DEAL_SECS  = 60;    // "48 hours to sign" — long enough to wait him out
 const HOT_DEALS = [
   {name:'GROUNDTRUTH', pitch:'foundation models for HVAC'},
@@ -254,7 +254,9 @@ function spawnEntities() {
     if (ch === 'B') ents.push({t:'coin', kind:'seat', x, y, r:12, taken:false});
     if (ch === 'P') ents.push({t:'coin', kind:'prorata', x, y, r:11, taken:false});
     if (ch === 'M') ents.push({t:'coin', kind:'fees', x, y, r:11, taken:false});
-    if (ch === 'g') ents.push({t:'goomba', x, y: ty*TILE + TILE - 13, vx:-60, w:26, h:26, dead:0});
+    if (ch === 'g') ents.push({t:'goomba', x, y: ty*TILE + TILE - 13,
+                               vx:-(60 + (typeof G!=='undefined' && G ? (G.resolved||0)*16 : 0)),
+                               w:26, h:26, dead:0});
     if (ch === 'F' && ty === 7) ents.push({t:'flag', x: tx*TILE + TILE/2, y: ty*TILE});
     if (ch === 'X') ents.push({t:'boss', x, y:(ty+1)*TILE, groundY:(ty+1)*TILE,
                                face:-1, vx:0, vy:0, stun:0, mode:'walk',
@@ -334,8 +336,11 @@ function update(dt) {
   P.vx = ax * RUN;
 
   // conviction jump: tap = small check, hold = big check, harder landing
-  if (keys.jump && P.onGround) {
-    P.vy = JUMP_MIN; P.onGround = false; P.holdT = 0; P.jumpHeld = true; sfx.jump();
+  P.coyoteT = P.onGround ? 0.09 : Math.max(0, (P.coyoteT||0) - dt);
+  P.jBufT = (keys.jump && !P.jHeldPrev) ? 0.10 : Math.max(0, (P.jBufT||0) - dt);
+  P.jHeldPrev = !!keys.jump;
+  if ((keys.jump || P.jBufT > 0) && (P.onGround || P.coyoteT > 0)) {
+    P.vy = JUMP_MIN; P.onGround = false; P.coyoteT = 0; P.jBufT = 0; P.holdT = 0; P.jumpHeld = true; sfx.jump();
   }
   if (P.jumpHeld && keys.jump && P.holdT < HOLD_MAX && P.vy < 0) {
     P.vy += JUMP_HOLD * dt; P.holdT += dt;
@@ -466,7 +471,7 @@ function updateBoss(dt) {
 
   // the door: you can just walk out. it costs you nothing today.
   const door = ents.find(e => e.t === 'door');
-  if (door && P.x < door.x + 26 && P.onGround) {   // anywhere in the doorway, incl. flush to the wall
+  if (door && Math.abs(P.x - door.x) < 15 && Math.abs(P.vx) < 1 && P.onGround) {  // deliberate: stand still in the doorway
     D.passT += dt;
     if (D.passT >= 1.2) return loseDeal('You walked out of the room.', true);
   } else D.passT = Math.max(0, D.passT - dt*2);
@@ -1011,7 +1016,7 @@ function drawHUD() {
     ctx.fillStyle = G.deal.t < 12 ? '#ff6b81' : '#6a677f';
     ctx.fillText('48 HOURS TO SIGN: ' + Math.ceil(G.deal.t), W-20, 72);
     ctx.fillStyle = '#6a677f';
-    ctx.fillText('the door is behind you', W-20, 90);
+    ctx.fillText('stand still in the door to pass', W-20, 90);
   } else {
     ctx.fillText('best exit: ' + (G.exits.length ? fmtM(bestExit()) : '—'), W-20, 72);
     ctx.fillText('[X] secondary (coward\'s button)', W-20, 90);

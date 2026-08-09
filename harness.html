@@ -81,12 +81,12 @@ const EXPORTS = `;return{
      START_RESERVES,ROUND_SIZE,DILUTE,FOLLOWON_COST,HOT_ENTRY,BID_STEP,HOT_TARGET,DEAL_SECS,
      LEVEL_ROWS,ARENA_ROWS,ROUND_NAMES}
 }`;
-function boot(seed){
+function boot(seed, src){
   const doc = {getElementById:()=>({getContext:()=>stubCtx(),width:960,height:540})};
   const win = {AudioContext:null};                      // silences all audio paths
   const perf = {now:()=>0};                             // deterministic animation clocks
   const fn = new Function('document','window','performance','requestAnimationFrame',
-                          'addEventListener', GAME_SRC + EXPORTS);
+                          'addEventListener', (src||GAME_SRC) + EXPORTS);
   const g = fn(doc, win, perf, noop, noop);
   g._rng = mulberry32(seed >>> 0);
   return g;
@@ -223,24 +223,26 @@ function probeFeel(){
                                       g.state='play'; g.keys={}; });
   const ground = 10*K.TILE;
 
-  // --- coyote time: jump AFTER walking off a ledge
+  // --- coyote time: jump AFTER walking off a ledge (largest working delay = window)
   let coyote = -1;
-  for (let d=0; d<=14 && coyote<0; d++){
+  for (let d=0; d<=14; d++){
     arena(); g.P.x=6*K.TILE; g.P.y=7*K.TILE; g.P.vy=0; g.P.onGround=true;
-    g.keys={right:true}; let left=-1;
+    g.keys={right:true}; let left=-1, ok=false;
     for (let f=0; f<60; f++){
       if (left>=0 && f===left+d) g.keys.jump=true; else g.keys.jump=false;
       const wasOn=g.P.onGround; g.update(F);
       if (wasOn && !g.P.onGround && left<0) left=f;
-      if (left>=0 && f>left+d && g.P.vy<-300){ coyote=d; break; }
+      if (left>=0 && f>left+d && g.P.vy<-300){ ok=true; break; }
     }
+    if (ok) coyote=d; else if (coyote>=0) break;
   }
   // --- jump buffer: TAP jump shortly BEFORE landing, released before touchdown
+  // (largest early-press that still jumps = the buffer window)
   let buffer = -1;
-  for (let d=1; d<=14 && buffer<0; d++){
+  for (let d=1; d<=14; d++){
     arena(); g.P.x=8*K.TILE; g.P.y=5*K.TILE; g.P.vy=0; g.P.onGround=false; g.keys={};
-    let land=-1, probe=[];
-    for (let f=0; f<90; f++){ probe.push(g.P.y); g.update(F); if (g.P.onGround){land=f;break;} }
+    let land=-1;
+    for (let f=0; f<90; f++){ g.update(F); if (g.P.onGround){land=f;break;} }
     if (land<0) break;
     arena(); g.P.x=8*K.TILE; g.P.y=5*K.TILE; g.P.vy=0; g.P.onGround=false;
     let jumped=false;
@@ -252,7 +254,7 @@ function probeFeel(){
       g.update(F);
       if (f>land && g.P.vy<-300) { jumped=true; break; }
     }
-    if (jumped) buffer=d;
+    if (jumped) buffer=d; else if (buffer>=0) break;
   }
   // --- input latency (frames until horizontal motion begins)
   arena(); g.P.x=8*K.TILE; g.P.y=ground; g.P.vy=0; g.P.onGround=true; g.keys={right:true};
@@ -597,52 +599,230 @@ function probeBugs(){
 function median(a){ if(!a.length) return 0; const s=[...a].sort((x,y)=>x-y);
   const m=s.length>>1; return s.length%2?s[m]:(s[m-1]+s[m])/2; }
 
+// ================================================================ EXPERIMENTS
+// The harness does not merely suggest changes — it APPLIES candidate patches to
+// the game source in memory, replays the game under each variant with the same
+// seeded bots, and measures whether fun improved. Experiments are allowed to
+// break the game: violations are recorded, the shipped file is never touched,
+// and git holds the rollback. A recommendation here is a measured result.
+const EXPERIMENTS = [
+ {id:'door', name:'Deliberate pass door', deps:[],
+  jump:'Passing requires standing still in the doorway. Retreating under pressure can no '+
+       'longer fire the lose button — walking out becomes a choice instead of an accident.',
+  patches:[{find:"door && P.x < door.x + 26 && P.onGround",
+            repl:"door && Math.abs(P.x - door.x) < 15 && Math.abs(P.vx) < 1 && P.onGround"}],
+  judge:(b,v)=> v.boss.platform.winRate >= b.boss.platform.winRate + 0.3
+             || v.boss.wait.winRate    >= b.boss.wait.winRate    + 0.3},
+
+ {id:'coyote', name:'Coyote time + jump buffer in the physics', deps:[],
+  jump:'90ms of ledge grace and a 100ms input buffer, patched into the jump check itself.',
+  patches:[{find:"if (keys.jump && P.onGround) {\n    P.vy = JUMP_MIN; P.onGround = false; P.holdT = 0; P.jumpHeld = true; sfx.jump();\n  }",
+            repl:"P.coyoteT = P.onGround ? 0.09 : Math.max(0, (P.coyoteT||0) - dt);\n"+
+                 "  P.jBufT = (keys.jump && !P.jHeldPrev) ? 0.10 : Math.max(0, (P.jBufT||0) - dt);\n"+
+                 "  P.jHeldPrev = !!keys.jump;\n"+
+                 "  if ((keys.jump || P.jBufT > 0) && (P.onGround || P.coyoteT > 0)) {\n"+
+                 "    P.vy = JUMP_MIN; P.onGround = false; P.coyoteT = 0; P.jBufT = 0; "+
+                 "P.holdT = 0; P.jumpHeld = true; sfx.jump();\n  }"}],
+  judge:(b,v)=> v.feel.coyoteMs > 0 && v.feel.bufferMs > 0 &&
+                v.runs.violations.length === 0 &&
+                v.boss.bid.winRate >= b.boss.bid.winRate - 0.05},
+
+ {id:'clock', name:'Deal clock bites (60s → 30s)', deps:['door'],
+  jump:'Patience gets a real price: three winded cycles eat most of the signing window, so '+
+       'bidding buys time you might actually need. Requires the door fix or patience is suicide anyway.',
+  patches:[{find:"const DEAL_SECS  = 60;", repl:"const DEAL_SECS  = 30;"}],
+  judge:(b,v)=>{
+    const pat = x => x.boss.wait.winRate >= x.boss.platform.winRate ? x.boss.wait : x.boss.platform;
+    // live decision: both lines win often enough to be playable, patience is
+    // meaningfully cheaper, and patience is no longer strictly safe
+    return v.boss.bid.winRate >= 0.7 && pat(v).winRate >= 0.5 &&
+           pat(v).medOwn > v.boss.bid.medOwn * 1.5 &&
+           (pat(v).winRate < 1 || v.boss.bid.winRate > pat(v).winRate);
+  }},
+
+ {id:'goombas', name:'Enemies scale with the fund age', deps:[],
+  jump:'Goomba speed rises 16px/s per resolved company. The tenth company replays the same '+
+       'tiles against a faster level — difficulty finally tracks the run instead of staying flat.',
+  patches:[{find:"vx:-60, w:26, h:26, dead:0",
+            repl:"vx:-(60 + (typeof G!=='undefined' && G ? (G.resolved||0)*16 : 0)), w:26, h:26, dead:0"}],
+  judge:(b,v)=> (v.runs.expert.deaths + v.runs.naive.deaths) > 0 &&
+                v.runs.expert.best >= b.runs.expert.best * 0.5},
+
+ {id:'ceiling', name:'Raise the hot-deal ceiling (240 → 380)', deps:['door'],
+  jump:'A hot deal won cheap can now mint ~15x, which makes the top grade bands physically '+
+       'reachable. Depends on the door fix: without it nobody wins cheap at all.',
+  patches:[{find:"const HOT_TARGET = 240;", repl:"const HOT_TARGET = 380;"}],
+  // must IMPROVE on its dep-baseline, not just inherit a good state from it
+  judge:(b,v)=> v.runs.expert.best > b.runs.expert.best * 1.15 &&
+                (v.runs.expert.grades.includes('FIRST QUARTILE')
+              || v.runs.expert.grades.includes('TOP DECILE'))},
+];
+
+function applyPatches(src, ids){
+  const missing = [];
+  for (const id of ids){
+    const ex = EXPERIMENTS.find(e=>e.id===id);
+    for (const p of ex.patches){
+      if (src.indexOf(p.find) < 0){ missing.push(id+':'+p.find.slice(0,40)); continue; }
+      src = src.replace(p.find, p.repl);
+    }
+  }
+  return {src, missing};
+}
+
+// quick, comparable metrics for one design variant
+function quickFeel(src){
+  const g = boot(1, src); const K = g.K;
+  const arena = () => seeded(g, ()=>{ g.state='title'; g.keys={boss:true}; g.update(F);
+                                      g.state='play'; g.keys={}; });
+  let coyote=-1;                       // LARGEST delay that still jumps = the window
+  for (let d=0; d<=14; d++){
+    arena(); g.P.x=6*K.TILE; g.P.y=7*K.TILE; g.P.vy=0; g.P.onGround=true;
+    g.keys={right:true}; let left=-1, ok=false;
+    for (let f=0; f<60; f++){
+      g.keys.jump = (left>=0 && f===left+d);
+      const was=g.P.onGround; g.update(F);
+      if (was && !g.P.onGround && left<0) left=f;
+      if (left>=0 && f>left+d && g.P.vy<-300){ ok=true; break; }
+    }
+    if (ok) coyote=d; else if (coyote>=0) break;
+  }
+  let buffer=-1;
+  for (let d=1; d<=14; d++){
+    arena(); g.P.x=8*K.TILE; g.P.y=5*K.TILE; g.P.vy=0; g.P.onGround=false; g.keys={};
+    let land=-1;
+    for (let f=0; f<90; f++){ g.update(F); if (g.P.onGround){land=f;break;} }
+    if (land<0) break;
+    arena(); g.P.x=8*K.TILE; g.P.y=5*K.TILE; g.P.vy=0; g.P.onGround=false;
+    const tapLen = Math.min(3, d);
+    let ok=false;
+    for (let f=0; f<90; f++){
+      g.keys = (f>=land-d && f<land-d+tapLen) ? {jump:true} : {};
+      g.update(F);
+      if (f>land && g.P.vy<-300){ ok=true; break; }
+    }
+    if (ok) buffer=d; else if (buffer>=0) break;   // largest early-press that still lands
+  }
+  return {coyoteMs: coyote<0?0:(coyote/60*1000)|0, bufferMs: buffer<0?0:(buffer/60*1000)|0};
+}
+function evalBoss(src, seeds){
+  const plans = {bid:[], wait:[], platform:[]};
+  for (const plan of Object.keys(plans))
+    for (let s=0; s<seeds; s++){
+      const g = boot(3000+s, src);
+      plans[plan].push(seeded(g, ()=>{
+        g.state='title'; g.keys={boss:true}; g.update(F); g.state='play'; g.keys={};
+        let jf=0;
+        for (let f=0; f<60*80 && g.state==='play'; f++){
+          const st=bossStep(g,jf,plan); jf=st.jf; st.keys.jump=jf-->0; g.keys=st.keys; g.update(F);
+        }
+        return {won:g.state==='dealwon', own:g.G.lastHot?g.G.lastHot.own:0};
+      }));
+    }
+  const agg = a => ({winRate:+(a.filter(r=>r.won).length/a.length).toFixed(2),
+                     medOwn:+median(a.filter(r=>r.won).map(r=>r.own)).toFixed(1)});
+  return {bid:agg(plans.bid), wait:agg(plans.wait), platform:agg(plans.platform)};
+}
+function evalRuns(src){
+  // expert waits on the floor: the patient line the pricing rewards.
+  // (the perch is a decoy — 8px of clearance means drop-ins die; measured earlier)
+  const pols=[{n:'naive',skill:0,plan:'bid'},{n:'expert',skill:2,plan:'wait'}];
+  const out={}; const bag={seen:new Set(), list:[]};
+  for (const p of pols){
+    const rs=[];
+    for (let s=0; s<3; s++) rs.push(runGame(boot(4000+s, src), {skill:p.skill, plan:p.plan, maxSec:300, bag}));
+    out[p.n]={best:+median(rs.map(r=>r.best)).toFixed(0),
+              deaths:rs.reduce((a,r)=>a+r.ev.deaths,0),
+              won:rs.reduce((a,r)=>a+r.ev.dealsWon,0),
+              grades:[...new Set(rs.map(r=>r.grade))]};
+  }
+  out.spread = out.naive.best>0 ? +(out.expert.best/out.naive.best).toFixed(2)
+                                : (out.expert.best>0?99:1);
+  out.violations = bag.list;
+  return out;
+}
+async function runExperiments(setStatus){
+  const cache = new Map();
+  async function evalFor(ids){
+    const key = ids.slice().sort().join('+') || 'baseline';
+    if (cache.has(key)) return cache.get(key);
+    const {src, missing} = applyPatches(GAME_SRC, ids);
+    if (missing.length){ const r={stale:missing}; cache.set(key,r); return r; }
+    setStatus('experiment: '+key+'…'); await tick();
+    const r = {feel:quickFeel(src), boss:evalBoss(src,8), runs:evalRuns(src)};
+    cache.set(key, r); return r;
+  }
+  const base = await evalFor([]);
+  const results = [], adopted = [];
+  for (const ex of EXPERIMENTS){
+    const baseline = await evalFor(ex.deps);
+    const variant  = await evalFor([...ex.deps, ex.id]);
+    let verdict, note='';
+    if (variant.stale || baseline.stale){
+      verdict='STALE'; note='patch pattern not found — game source moved: '+
+        (variant.stale||baseline.stale).join('; ');
+    } else {
+      verdict = ex.judge(baseline, variant) ? 'ADOPT' : 'REJECT';
+      if (verdict==='ADOPT') adopted.push(ex.id);
+    }
+    results.push({ex, verdict, note, baseline, variant});
+  }
+  let combo = null;
+  if (adopted.length){ combo = await evalFor(adopted); combo.ids = adopted.slice(); }
+  return {base, results, combo, adopted};
+}
+
 // ---------------------------------------------------------------- recommender
-// Ranked by which layer is weakest, because lower layers gate upper ones: a
-// stiff jump cannot be fixed with more content, and more content cannot fix a
-// choice that has a dominant answer.
-function recommend(F1,F2,F3,F4){
-  const recs = [];
-  if (F1.coyote<0 || F1.buffer<0)
-    recs.push({p:1, t:'Add coyote time + jump buffering (~6 lines, L1)',
-      w:`The two are missing entirely. Every platformer that feels good has both; their absence is `+
-        `felt as the game dropping inputs. This is the cheapest fix in the list and it improves every `+
-        `second of play, including the boss fight, where the punish window demands precise hops. `+
-        `Track a coyote timer that resets on leaving ground, and a buffer timer set on jump-press.`});
-  if (!(F1.stompShake>0))
-    recs.push({p:2, t:'Give the stomp weight — hit-stop + shake (L1)',
-      w:`Killing an enemy is the most-repeated verb in the game and currently the least satisfying: `+
-        `bidding on the boss shakes the screen, killing a Down Round Goomba does not. 3-4 frames of `+
-        `hit-stop plus a short shake would make the common case feel as good as the rare one.`});
-  if (F3.deaths===0)
-    recs.push({p:3, t:'Make 1-1 pose a real risk, or stop replaying it (L3)',
-      w:`A competent policy died zero times across six full runs. With ten companies and no failure `+
-        `pressure, "nine of them are supposed to die" is stated by the UI but never enacted by the `+
-        `level — the central joke is asserted rather than experienced. Either escalate the layout per `+
-        `company (more Goombas, wider pits as the fund clock runs down) or build 2-1 Competitive `+
-        `Process, whose auto-scroll supplies pressure for free.`});
-  recs.push({p:4, t:'Give reserves a second sink (L2)',
-    w:`Reserves have exactly one use, so spending is never weighed against anything and the "decision" `+
-      `has a single correct answer. Let reserves also buy something in the boss room — defending pro `+
-      `rata, or a pre-emptive strike that skips a bid — and the same number becomes a genuine choice `+
-      `between deploying now and holding for the deal you have not met yet.`});
-  if (!F4.grades.includes('TOP DECILE'))
-    recs.push({p:5, t:'Make TOP DECILE reachable, or retune the band (L4)',
-      w:`No policy the harness can express reaches it: it needs best≥15x AND DPI≥1.5 at once, and the `+
-        `cheap hot deal tops out around 11-13x. A top grade nobody can hit is a fake ceiling, and `+
-        `mastery stops the moment players work that out. Either raise the cheap-entry multiplier or `+
-        `lower the band to ~12x.`});
-  if (F2.dominated)
-    recs.push({p:6, t:'Give impatience something to buy (L2)',
-      w:`Waiting for the winded window is better on price and no riskier, so bidding is currently a `+
-        `knowledge check rather than a temptation. Make the fund clock bite during the fight — visible `+
-        `LP pressure, or a deal timer short enough that three patient cycles genuinely costs you — so `+
-        `paying up buys time you actually need.`});
-  recs.push({p:7, t:'Second-order: the anti-portfolio should sting during the run (L2/L4)',
-    w:`It currently appears once, on the end screen. Surfacing a passed company's rising mark between `+
-      `levels would turn a post-hoc joke into live information the player reasons against — pressure `+
-      `to chase the next hot deal, which is exactly the mistake the game wants to tempt them into.`});
-  return recs.sort((a,b)=>a.p-b.p);
+// Recommendations are now measured results, ranked ADOPT first. Only what the
+// bots cannot feel (impact, audio) remains judgement — flagged as such.
+function evidence(r){
+  if (r.verdict==='STALE') return r.note;
+  const b=r.baseline, v=r.variant;
+  const bits=[];
+  const pat = x => x.boss.wait.winRate >= x.boss.platform.winRate ? x.boss.wait : x.boss.platform;
+  if (pat(v).winRate !== pat(b).winRate)
+    bits.push(`patient win ${(pat(b).winRate*100)|0}%→${(pat(v).winRate*100)|0}%`);
+  if (v.boss.bid.winRate !== b.boss.bid.winRate)
+    bits.push(`bid win ${(b.boss.bid.winRate*100)|0}%→${(v.boss.bid.winRate*100)|0}%`);
+  if (pat(v).medOwn && pat(v).medOwn !== pat(b).medOwn)
+    bits.push(`patient ownership ${pat(b).medOwn||0}%→${pat(v).medOwn}%`);
+  if (v.runs.expert.deaths !== b.runs.expert.deaths || v.runs.naive.deaths !== b.runs.naive.deaths)
+    bits.push(`deaths ${b.runs.naive.deaths+b.runs.expert.deaths}→${v.runs.naive.deaths+v.runs.expert.deaths}`);
+  if (v.runs.spread !== b.runs.spread) bits.push(`skill spread ${b.runs.spread}x→${v.runs.spread}x`);
+  if (JSON.stringify(v.runs.expert.grades)!==JSON.stringify(b.runs.expert.grades))
+    bits.push(`expert grades: ${v.runs.expert.grades.join('/')}`);
+  if (v.feel.coyoteMs !== b.feel.coyoteMs) bits.push(`coyote ${b.feel.coyoteMs}→${v.feel.coyoteMs}ms`);
+  if (v.feel.bufferMs !== b.feel.bufferMs) bits.push(`buffer ${b.feel.bufferMs}→${v.feel.bufferMs}ms`);
+  if (v.runs.violations.length) bits.push(`⚠ ${v.runs.violations.length} invariant violations`);
+  return bits.join(' · ') || 'no measurable change';
+}
+function recommend(EXP){
+  const recs=[]; let p=1;
+  for (const r of EXP.results.filter(r=>r.verdict==='ADOPT'))
+    recs.push({p:p++, t:`ADOPT — ${r.ex.name}`, w:`${r.ex.jump}  Measured: ${evidence(r)}.`});
+  if (EXP.combo)
+    recs.push({p:p++, t:`SHIP THE SET — ${EXP.combo.ids.join(' + ')}`,
+      w:`All adopted patches together: patient win ${(EXP.combo.boss.platform.winRate*100)|0}% at `+
+        `${EXP.combo.boss.platform.medOwn}% ownership vs bid ${(EXP.combo.boss.bid.winRate*100)|0}% at `+
+        `${EXP.combo.boss.bid.medOwn}%, deaths ${EXP.combo.runs.naive.deaths+EXP.combo.runs.expert.deaths}, `+
+        `skill spread ${EXP.combo.runs.spread}x, expert grades ${EXP.combo.runs.expert.grades.join('/')}. `+
+        `${EXP.combo.runs.violations.length? '⚠ violations: '+EXP.combo.runs.violations.join(' | ')
+                                           : 'Zero invariant violations under the full set.'}`});
+  for (const r of EXP.results.filter(r=>r.verdict==='REJECT'))
+    recs.push({p:p++, t:`REJECT — ${r.ex.name}`,
+      w:`Did not clear its bar. Measured: ${evidence(r)}. The patch stays in the harness as a `+
+        `recipe; retune its constant and re-run rather than re-deriving it.`});
+  for (const r of EXP.results.filter(r=>r.verdict==='STALE'))
+    recs.push({p:p++, t:`STALE — ${r.ex.name}`, w:r.note});
+  recs.push({p:p++, t:'HAND-VERIFY — stomp hit-stop + screen shake',
+    w:`Bots cannot feel impact, so this ships on judgement: 3-4 frames of hit-stop and a short `+
+      `shake on Goomba kills, behind the same git tag. The harness's job here is only to confirm `+
+      `nothing broke afterwards.`});
+  recs.push({p:p++, t:'NEXT EXPERIMENTS TO WRITE — reserves second sink; anti-portfolio mid-run',
+    w:`Both are structural bets the current patch set cannot express in one string replacement. `+
+      `Worth writing as proper experiment patches next: reserves spendable in the boss room, and `+
+      `the anti-portfolio's rising marks surfaced between levels.`});
+  return recs;
 }
 
 // ---------------------------------------------------------------- report
@@ -659,6 +839,18 @@ function render(){
     for (const f of rows)
       h += `<tr><td class="${f.sev}" style="width:52px">${f.sev}</td>`+
            `<td style="width:170px"><b>${f.name}</b></td><td>${f.detail}</td></tr>`;
+    h += '</table></div>';
+  }
+  const EXP = window.__EXP;
+  if (EXP){
+    h += `<h2>EXPERIMENTS — patches applied to the game in memory, replayed, measured</h2><div class="layer"><table>`;
+    h += `<tr><th>verdict</th><th>experiment</th><th>evidence (dep-baseline → variant)</th></tr>`;
+    for (const r of EXP.results){
+      const cls = r.verdict==='ADOPT'?'PASS':r.verdict==='REJECT'?'WARN':'FAIL';
+      h += `<tr><td class="${cls}" style="width:60px">${r.verdict}</td>`+
+           `<td style="width:230px"><b>${r.ex.name}</b>${r.ex.deps.length?`<br><span style="color:var(--dim)">stacked on: ${r.ex.deps.join(', ')}</span>`:''}</td>`+
+           `<td>${evidence(r)}</td></tr>`;
+    }
     h += '</table></div>';
   }
   h += `<h2>WHAT TO BUILD NEXT</h2>`;
@@ -680,15 +872,20 @@ function render(){
     st.textContent = 'L4 depth…';  const F4 = probeDepth();      await tick();
     st.textContent = 'fairness…';  const FF = probeFairness();   await tick();
     st.textContent = 'bug sweep…'; const FB = probeBugs();       await tick();
-    window.__RECS = recommend(F1,F2,F3,F4);
+    const EXP = await runExperiments(s => st.textContent = s);
+    window.__EXP = EXP;
+    window.__RECS = recommend(EXP);
     window.__REPORT = {findings, recs:window.__RECS,
+      experiments: EXP.results.map(r=>({id:r.ex.id, verdict:r.verdict, evidence:evidence(r)})),
+      combo: EXP.combo ? {ids:EXP.combo.ids, boss:EXP.combo.boss, runs:EXP.combo.runs} : null,
       summary:{pass:findings.filter(f=>f.sev==='PASS').length,
                warn:findings.filter(f=>f.sev==='WARN').length,
                fail:findings.filter(f=>f.sev==='FAIL').length,
-               bugs:FB.list.length}};
+               bugs:FB.list.length,
+               adopted:EXP.adopted}};
     st.textContent = `done — ${window.__REPORT.summary.pass} pass, `+
       `${window.__REPORT.summary.warn} warn, ${window.__REPORT.summary.fail} fail, `+
-      `${FB.list.length} invariant violations`;
+      `${FB.list.length} violations · experiments: ${EXP.adopted.length} adopted of ${EXP.results.length}`;
     render();
   }catch(e){ st.textContent = 'HARNESS ERROR: '+e.message; window.__ERR = e.stack;
              console.error(e); }
