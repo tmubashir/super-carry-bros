@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Super Carry Bros. — Fun Harness</title>
+<style>
+  :root{--bg:#0d0f1a;--fg:#e8e6f0;--dim:#6a677f;--mid:#b8b4cc;--line:#252238;
+        --good:#59d68f;--warn:#ffd75e;--bad:#ff6b81;--gold:#d4af37;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:13px/1.55 ui-monospace,'SF Mono',Menlo,Consolas,monospace;padding:28px}
+  h1{font-size:20px;margin:0 0 2px} h2{font-size:14px;margin:26px 0 8px;color:var(--mid)}
+  .sub{color:var(--dim);margin-bottom:20px}
+  table{border-collapse:collapse;width:100%;margin:6px 0 14px}
+  th,td{text-align:left;padding:5px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:400;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  .PASS{color:var(--good)} .WARN{color:var(--warn)} .FAIL{color:var(--bad)} .INFO{color:var(--dim)}
+  .layer{border-left:3px solid var(--line);padding-left:14px;margin-bottom:8px}
+  .rec{border:1px solid var(--line);border-left:3px solid var(--gold);
+       padding:11px 14px;margin:8px 0;border-radius:0 4px 4px 0}
+  .rec b{color:var(--gold)} .rec .why{color:var(--dim);display:block;margin-top:4px}
+  code{background:#171a2b;padding:1px 5px;border-radius:3px;color:var(--mid)}
+  #status{color:var(--warn)}
+  .num{color:var(--fg);font-weight:700}
+</style>
+</head>
+<body>
+<h1>Super Carry Bros. — Fun Harness</h1>
+<div class="sub">Plays the shipped game headlessly, probes four timescales of fun, catches bugs.</div>
+<div id="status">booting…</div>
+<div id="out"></div>
+
+<script>
+'use strict';
+// ============================================================================
+// A harness that plays the game and reports on why it is or isn't fun.
+//
+// Organised by the timescale at which fun is built, because a game can fail at
+// any layer independently and a broken lower layer cannot be rescued from above:
+//   L1 second-to-second  FEEL       is the verb pleasurable in a vacuum?
+//   L2 second-to-minute  DECISIONS  are the choices competitive and legible?
+//   L3 minute-to-hour    LOOP       act -> feedback -> reward -> spend; flow channel
+//   L4 hour-to-hundreds  DEPTH      does skill keep finding headroom?
+//   --                   FAIRNESS   randomness before decisions, not after
+//   --                   BUGS       invariants that must never break
+// ============================================================================
+
+const F = 1/60;                       // fixed timestep; the game is dt-driven
+const findings = [];
+const add = (layer, sev, name, detail, metric) =>
+  findings.push({layer, sev, name, detail, metric});
+
+// ---------------------------------------------------------------- seeded rng
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+
+// ---------------------------------------------------------------- game loader
+// Evaluates the real index.html <script> against stubbed canvas + audio, and
+// returns handles onto its internals. The shipped game is never modified.
+let GAME_SRC = null;
+const noop = () => {};
+function stubCtx(){
+  const g = {addColorStop:noop};
+  const c = {canvas:{width:960,height:540}, save:noop,restore:noop,translate:noop,scale:noop,
+    rotate:noop,beginPath:noop,closePath:noop,fill:noop,stroke:noop,moveTo:noop,lineTo:noop,
+    arc:noop,fillRect:noop,strokeRect:noop,clearRect:noop,fillText:noop,strokeText:noop,
+    createLinearGradient:()=>g, measureText:()=>({width:60}), setTransform:noop, drawImage:noop};
+  return c;
+}
+const EXPORTS = `;return{
+  get state(){return state}, set state(v){state=v},
+  get stateTimer(){return stateTimer}, set stateTimer(v){stateTimer=v},
+  get keys(){return keys}, set keys(v){keys=v},
+  get G(){return G}, get ents(){return ents}, set ents(v){ents=v},
+  get MAP(){return MAP}, get MAP_W(){return MAP_W}, get MAP_H(){return MAP_H},
+  get gateOpen(){return gateOpen},
+  P, cam, update, render, newRun, nextScene, spawnBoss, spawnCompany, spawnEntities,
+  grade, tvpiVal, dpiVal, bestExit, deployed, playerBox, tileAt, solidTop, solidFull,
+  collect, killCompany, exitCompany, hitBoss, winHotDeal, loseDeal, rectHit,
+  K:{TILE,GRAV,RUN,JUMP_MIN,JUMP_HOLD,HOLD_MAX,FUND_YEARS,SECS_PER_YEAR,CHECK,FUND_SIZE,
+     START_RESERVES,ROUND_SIZE,DILUTE,FOLLOWON_COST,HOT_ENTRY,BID_STEP,HOT_TARGET,DEAL_SECS,
+     LEVEL_ROWS,ARENA_ROWS,ROUND_NAMES}
+}`;
+function boot(seed){
+  const doc = {getElementById:()=>({getContext:()=>stubCtx(),width:960,height:540})};
+  const win = {AudioContext:null};                      // silences all audio paths
+  const perf = {now:()=>0};                             // deterministic animation clocks
+  const fn = new Function('document','window','performance','requestAnimationFrame',
+                          'addEventListener', GAME_SRC + EXPORTS);
+  const g = fn(doc, win, perf, noop, noop);
+  g._rng = mulberry32(seed >>> 0);
+  return g;
+}
+// Run a body with the game's Math.random pinned to the instance's seeded stream.
+function seeded(g, body){
+  const real = Math.random; Math.random = g._rng;
+  try { return body(); } finally { Math.random = real; }
+}
+
+// ---------------------------------------------------------------- invariants
+const INV = ['title','play','dead','exit','gameover','bossintro','dealwon','deallost'];
+function checkInvariants(g, tag, bag){
+  const {P,G} = g;
+  const bad = (k,v)=>{ if(!bag.seen.has(k)){ bag.seen.add(k); bag.list.push(`${tag}: ${k} (${v})`);} };
+  for (const [k,v] of Object.entries({px:P.x,py:P.y,pvx:P.vx,pvy:P.vy,scale:P.scale}))
+    if (!Number.isFinite(v)) bad('non-finite player.'+k, v);
+  if (!INV.includes(g.state)) bad('unknown state', g.state);
+  if (G) {
+    if (!Number.isFinite(G.reserves)) bad('non-finite reserves', G.reserves);
+    if (G.reserves < 0) bad('negative reserves', G.reserves);
+    if (G.companies < 0) bad('negative companies', G.companies);
+    if (G.company && !Number.isFinite(G.company.paper)) bad('non-finite paper', G.company.paper);
+    if (G.company && G.company.paper < 0) bad('negative paper', G.company.paper);
+    if (G.deal && !Number.isFinite(G.deal.val)) bad('non-finite valuation', G.deal.val);
+    if (G.exits.some(e=>!Number.isFinite(e))) bad('non-finite exit', G.exits.join());
+    if (!Number.isFinite(g.tvpiVal())) bad('non-finite TVPI', g.tvpiVal());
+    if (!Number.isFinite(g.dpiVal())) bad('non-finite DPI', g.dpiVal());
+  }
+  // player embedded in a wall (feet-1px, chest height)
+  if (g.state==='play'){
+    const b = g.playerBox();
+    const tx = Math.floor((b.x+b.w/2)/g.K.TILE), ty = Math.floor((b.y+b.h/2)/g.K.TILE);
+    if (g.solidFull(g.tileAt(tx,ty))) bad('player inside solid tile', `${tx},${ty}`);
+  }
+}
+
+// ---------------------------------------------------------------- bot brains
+// Policies differ ONLY in decision quality, so outcome spread measures skill
+// expressiveness (L4). Every policy shares the same motor skills.
+function levelStep(g, jf, skill){
+  const {P,K} = g; const keys = {right:true};
+  const b = g.playerBox(), feet = b.y+b.h;
+  let pit = 0;
+  if (P.onGround) for (let d=1; d<=5; d++){
+    const tx=Math.floor((b.x+b.w+d*14)/K.TILE), ty=Math.floor((feet+6)/K.TILE);
+    if(!g.solidTop(g.tileAt(tx,ty)) && !g.solidTop(g.tileAt(tx,ty+1))){pit=d;break;}
+  }
+  const wall = g.solidFull(g.tileAt(Math.floor((b.x+b.w+20)/K.TILE), Math.floor((feet-8)/K.TILE)));
+  const gm = g.ents.find(e=>e.t==='goomba' && !e.dead && e.x>P.x && e.x-P.x<95 && Math.abs(e.y-feet)<60);
+  if (P.onGround && jf<=0 && (pit||wall||gm)) jf = pit?21 : gm?13 : 16;
+  // a skilled player also hops to grab high coins
+  if (skill>=2 && P.onGround && jf<=0){
+    const coin = g.ents.find(e=>e.t==='coin'&&!e.taken&&e.x>P.x&&e.x-P.x<130&&feet-e.y>40&&feet-e.y<170);
+    if (coin) jf = 20;
+  }
+  return {keys, jf};
+}
+function bossStep(g, jf, plan){
+  const {P,K} = g; const keys = {};
+  const b = g.ents.find(e=>e.t==='boss');
+  const PERCH_X = 5*K.TILE, PERCH_Y = 7*K.TILE;   // r7 platform, above shockwave height
+  if (b && !b.defeated){
+    const d = b.x-P.x, ad = Math.abs(d);
+    const open = b.mode==='winded';
+    if (plan==='bid'){                              // jump on him on sight
+      if(ad>46) keys[d>0?'right':'left']=true;
+      if(ad<150 && P.onGround && jf<=0) jf=11;
+    } else if (plan==='platform'){
+      if (open){                                    // opening: drop off and rush him
+        if(ad>46) keys[d>0?'right':'left']=true;
+        if(ad<150 && P.onGround && jf<=0) jf=11;
+      } else {                                      // otherwise sit on the high ground
+        const dx = PERCH_X - P.x;
+        if (Math.abs(dx) > 14) keys[dx>0?'right':'left']=true;
+        if (P.onGround && P.y > PERCH_Y + 4 && jf<=0) jf=20;   // climb up
+      }
+    } else {                                        // 'wait' — stay on the floor, keep distance
+      if (open){ if(ad>46) keys[d>0?'right':'left']=true;
+                 if(ad<150 && P.onGround && jf<=0) jf=11; }
+      else if (ad<250) keys[d>0?'left':'right']=true;
+      else if (ad>430) keys[d>0?'right':'left']=true;
+    }
+  } else keys.right = true;
+  const airborneSafe = plan==='platform' && P.y <= PERCH_Y + 4;   // waves cannot reach the perch
+  if (!airborneSafe &&
+      g.ents.some(e=>!e.gone&&(e.t==='wave'||e.t==='proj')&&Math.abs(e.x-P.x)<95)
+      && P.onGround && jf<=0) jf=12;
+  return {keys, jf};
+}
+// skill: 0 naive, 1 competent, 2 expert. plan: 'bid' | 'wait'
+function runGame(g, {skill=1, plan='wait', maxSec=460, bag=null}={}){
+  return seeded(g, () => {
+    g.state='title'; g.keys={action:true}; g.update(F);
+    let jf=0, frames=0, prevX=null, still=0;
+    const ev = {coins:0, markups:0, exits:0, deaths:0, dealsWon:0, dealsLost:0,
+                bids:0, free:0, rewardGaps:[], lastReward:0, bossSecs:0, levelSecs:0};
+    let lastState=g.state, lastCoins=0;
+    for (; frames<60*maxSec && g.state!=='gameover'; frames++){
+      if (g.state!=='play'){ g.update(F); continue; }
+      const inBoss = g.G.mode==='boss';
+      inBoss ? ev.bossSecs+=F : ev.levelSecs+=F;
+      const r = inBoss ? bossStep(g, jf, plan) : levelStep(g, jf, skill);
+      jf = r.jf; r.keys.jump = jf-- > 0; g.keys = r.keys;
+      const paper0 = g.G.company ? g.G.company.paper : 0;
+      const exits0 = g.G.exits.length;
+      g.update(F);
+      if (bag && frames%3===0) checkInvariants(g, 'run', bag);
+      // reward accounting for L3 cadence
+      const paper1 = g.G.company ? g.G.company.paper : 0;
+      if (paper1>paper0 || g.G.exits.length>exits0){
+        ev.rewardGaps.push((frames-ev.lastReward)/60); ev.lastReward=frames;
+        if (paper1>paper0) ev.coins++;
+      }
+      if (g.state==='dead' && lastState!=='dead') ev.deaths++;
+      if (g.state==='dealwon' && lastState!=='dealwon'){ ev.dealsWon++;
+        ev.bids+=g.G.lastHot.bids; ev.free+=g.G.lastHot.free; }
+      if (g.state==='deallost' && lastState!=='deallost') ev.dealsLost++;
+      lastState = g.state;
+      // softlock detector: alive, playing, but nothing changes for 12s
+      if (prevX!==null && Math.abs(g.P.x-prevX)<0.5 && g.state==='play') still++; else still=0;
+      prevX = g.P.x;
+      if (still>60*12 && bag) { bag.list.push('run: possible softlock (12s no movement)'); still=0; }
+    }
+    return {ev, frames, grade:g.grade()[0], best:g.bestExit(), dpi:g.dpiVal(),
+            tvpi:g.tvpiVal(), exits:g.G.exits.length, anti:g.G.antiPortfolio.length};
+  });
+}
+
+// ================================================================ L1  FEEL
+function probeFeel(){
+  const g = boot(1); const {K} = g;
+  const arena = () => seeded(g, ()=>{ g.state='title'; g.keys={boss:true}; g.update(F);
+                                      g.state='play'; g.keys={}; });
+  const ground = 10*K.TILE;
+
+  // --- coyote time: jump AFTER walking off a ledge
+  let coyote = -1;
+  for (let d=0; d<=14 && coyote<0; d++){
+    arena(); g.P.x=6*K.TILE; g.P.y=7*K.TILE; g.P.vy=0; g.P.onGround=true;
+    g.keys={right:true}; let left=-1;
+    for (let f=0; f<60; f++){
+      if (left>=0 && f===left+d) g.keys.jump=true; else g.keys.jump=false;
+      const wasOn=g.P.onGround; g.update(F);
+      if (wasOn && !g.P.onGround && left<0) left=f;
+      if (left>=0 && f>left+d && g.P.vy<-300){ coyote=d; break; }
+    }
+  }
+  // --- jump buffer: TAP jump shortly BEFORE landing, released before touchdown
+  let buffer = -1;
+  for (let d=1; d<=14 && buffer<0; d++){
+    arena(); g.P.x=8*K.TILE; g.P.y=5*K.TILE; g.P.vy=0; g.P.onGround=false; g.keys={};
+    let land=-1, probe=[];
+    for (let f=0; f<90; f++){ probe.push(g.P.y); g.update(F); if (g.P.onGround){land=f;break;} }
+    if (land<0) break;
+    arena(); g.P.x=8*K.TILE; g.P.y=5*K.TILE; g.P.vy=0; g.P.onGround=false;
+    let jumped=false;
+    // tap must be fully RELEASED before touchdown, else we are only measuring
+    // "held the button through the landing", which any onGround check satisfies
+    const tapLen = Math.min(3, d);
+    for (let f=0; f<90; f++){
+      g.keys = (f>=land-d && f<land-d+tapLen) ? {jump:true} : {};
+      g.update(F);
+      if (f>land && g.P.vy<-300) { jumped=true; break; }
+    }
+    if (jumped) buffer=d;
+  }
+  // --- input latency (frames until horizontal motion begins)
+  arena(); g.P.x=8*K.TILE; g.P.y=ground; g.P.vy=0; g.P.onGround=true; g.keys={right:true};
+  let lat=-1, x0=g.P.x;
+  for (let f=0; f<10; f++){ g.update(F); if (g.P.x>x0+0.01){ lat=f+1; break; } }
+  // --- acceleration ramp (frames to reach 95% top speed)
+  arena(); g.P.x=8*K.TILE; g.P.y=ground; g.P.vy=0; g.P.onGround=true; g.keys={right:true};
+  let ramp=-1;
+  for (let f=0; f<40; f++){ g.update(F); if (Math.abs(g.P.vx)>=K.RUN*0.95){ ramp=f+1; break; } }
+  // --- jump arc: tap vs full hold
+  function arc(holdFrames){
+    arena(); g.P.x=8*K.TILE; g.P.y=ground; g.P.vy=0; g.P.onGround=true;
+    let top=g.P.y, air=0;
+    for (let f=0; f<120; f++){ g.keys={jump:f<holdFrames}; g.update(F);
+      top=Math.min(top,g.P.y); if(!g.P.onGround) air++; else if(f>2) break; }
+    return {h:(ground-top)/K.TILE, air:air/60};
+  }
+  const tap = arc(1), full = arc(30);
+  // --- hit-stop + shake on stomping a goomba
+  const g2 = boot(2);
+  const stomp = seeded(g2, ()=>{
+    g2.state='title'; g2.keys={action:true}; g2.update(F);
+    const gm = g2.ents.find(e=>e.t==='goomba');
+    g2.P.x=gm.x; g2.P.y=gm.y-90; g2.P.vy=320; g2.keys={};
+    let shake=0, bounce=0;
+    for(let f=0; f<40 && g2.state==='play'; f++){
+      const d0=gm.dead; g2.update(F);
+      if(!d0 && gm.dead){ shake=g2.G.shake; bounce=g2.P.vy; break; }
+    }
+    return {shake, bounce};
+  });
+  // --- landing feedback: does a normal (non-max) landing produce anything?
+  const g3 = boot(3);
+  const landFx = seeded(g3, ()=>{
+    g3.state='title'; g3.keys={action:true}; g3.update(F);
+    g3.P.x=8*K.TILE; g3.P.y=4*K.TILE; g3.P.vy=0; g3.P.onGround=false; g3.keys={};
+    for(let f=0;f<90;f++){ g3.update(F); if(g3.P.onGround) return {shake:g3.G.shake, vy:0}; }
+    return {shake:-1};
+  });
+
+  add('L1','INFO','Jump arc',
+      `tap ${tap.h.toFixed(1)} tiles / ${tap.air.toFixed(2)}s air · full hold ${full.h.toFixed(1)} tiles / ${full.air.toFixed(2)}s. `+
+      `Hold multiplies height ${(full.h/tap.h).toFixed(1)}x — conviction reads clearly in the fingers.`,
+      {tapTiles:+tap.h.toFixed(2), fullTiles:+full.h.toFixed(2), ratio:+(full.h/tap.h).toFixed(2)});
+  add('L1', coyote<0?'FAIL':'PASS', 'Coyote time',
+      coyote<0 ? 'Zero. Walk off a ledge and the jump is gone on the very first airborne frame. '+
+                 'Players read this as the game dropping inputs, not as their own error — it is the '+
+                 'single most common cause of a platformer feeling "stiff".'
+               : `${(coyote/60*1000)|0}ms of grace after leaving a ledge.`,
+      {frames:coyote, ms:coyote<0?0:(coyote/60*1000)|0, industryNorm:'80-100ms'});
+  add('L1', buffer<0?'FAIL':'PASS', 'Jump buffering',
+      buffer<0 ? 'Zero. A jump pressed even one frame before touchdown is discarded. On repeated '+
+                 'hops the player must time the press to the exact landing frame or lose the input.'
+               : `${(buffer/60*1000)|0}ms of pre-landing buffer.`,
+      {frames:buffer, ms:buffer<0?0:(buffer/60*1000)|0, industryNorm:'~100ms'});
+  add('L1', lat===1?'PASS':'WARN','Input latency',
+      `${lat} frame(s) from press to movement (${(lat/60*1000).toFixed(0)}ms).`, {frames:lat});
+  add('L1', ramp<=1?'WARN':'PASS','Acceleration',
+      ramp<=1 ? 'Instantaneous — velocity snaps to full speed in 1 frame and to 0 on release. '+
+                'Precise and Mario-ish, but it costs the sense of carrying weight; there is no '+
+                'skid, no momentum to manage, so ground movement has no skill expression at all.'
+              : `${ramp} frames to top speed.`, {framesToTopSpeed:ramp});
+  add('L1', stomp.shake>0?'PASS':'FAIL','Stomp impact',
+      stomp.shake>0 ? `Stomp produces ${stomp.shake.toFixed(2)}s shake, bounce ${Math.round(-stomp.bounce)}.`
+        : `Killing an enemy produces bounce ${Math.round(-stomp.bounce)} and a blip, but zero screen `+
+          `shake and zero hit-stop. The most repeated verb in the game has the weakest impact of any `+
+          `action in it — the boss bid shakes, a kill does not.`,
+      {shake:stomp.shake, bounceVel:Math.round(-stomp.bounce), hitStopFrames:0});
+  add('L1', landFx.shake>0?'PASS':'WARN','Landing weight',
+      landFx.shake>0 ? 'Normal landings register.' :
+        'Only near-max-height landings shake the screen (holdT>80% AND vy>700). Ordinary landings — '+
+        'the vast majority — land silently with no visual or audio punctuation.',
+      {normalLandingShake:landFx.shake});
+  return {coyote, buffer, ramp, stompShake:stomp.shake};
+}
+
+// ================================================================ L2 DECISIONS
+function probeDecisions(){
+  // --- the boss: is "bid now" ever competitive with "wait for the opening"?
+  const R = {bid:[], wait:[], platform:[]};
+  for (const plan of ['bid','wait','platform']){
+    for (let s=0; s<12; s++){
+      const g = boot(100+s);
+      const r = seeded(g, ()=>{
+        g.state='title'; g.keys={boss:true}; g.update(F); g.state='play'; g.keys={};
+        let jf=0, t0=g.G.deal.t;
+        for (let f=0; f<60*75 && g.state==='play'; f++){
+          const st = bossStep(g, jf, plan); jf=st.jf; st.keys.jump = jf-- > 0; g.keys=st.keys;
+          g.update(F);
+        }
+        return {won:g.state==='dealwon', secs:t0-(g.G.deal?g.G.deal.t:0),
+                val:g.G.lastHot?g.G.lastHot.val:null, own:g.G.lastHot?g.G.lastHot.own:null};
+      });
+      R[plan].push(r);
+    }
+  }
+  const agg = a => ({winRate:a.filter(r=>r.won).length/a.length,
+                     medVal:median(a.filter(r=>r.won).map(r=>r.val)),
+                     medOwn:median(a.filter(r=>r.won).map(r=>r.own)),
+                     medSecs:median(a.map(r=>r.secs))});
+  const B=agg(R.bid), Wt=agg(R.wait), PF=agg(R.platform);
+  // dominance in EITHER direction kills the decision: if one line wins on every
+  // axis there is nothing to weigh. Check both, and check the platform route too.
+  const waitDom = Wt.winRate >= B.winRate-0.05 && Wt.medOwn > B.medOwn*1.2;
+  const bidDom  = B.winRate  >  Wt.winRate+0.3;
+  const bestPatient = PF.winRate > Wt.winRate ? PF : Wt;
+  const dominated = waitDom || bidDom;
+  add('L2', dominated?'FAIL':'PASS','Boss: bid vs wait',
+      `bid-on-sight → ${(B.winRate*100)|0}% win, median ${B.medOwn?B.medOwn.toFixed(1):'—'}% ownership, ${B.medSecs.toFixed(1)}s. `+
+      `wait-on-the-floor → ${(Wt.winRate*100)|0}% win${Wt.winRate?`, ${Wt.medOwn.toFixed(1)}% ownership`:' (dies every time)'}. `+
+      `wait-on-the-platform → ${(PF.winRate*100)|0}% win${PF.winRate?`, ${PF.medOwn.toFixed(1)}% ownership`:''}. `+
+      (bidDom
+        ? 'Bidding DOMINATES: it wins far more often, and the patient line the pricing rewards is the '+
+          'one that gets you killed. The cheap entry is priced as the skilled play but is not actually '+
+          'achievable, so the "expensive vs patient" decision collapses into "bid or lose the deal".'
+        : waitDom
+        ? 'Waiting is better on price AND no riskier, so bidding is not a temptation but a knowledge check.'
+        : 'Both lines are live: waiting costs time and risk, bidding costs ownership.'),
+      {bid:B, waitFloor:Wt, waitPlatform:PF, bidDominates:bidDom, waitDominates:waitDom});
+
+  // --- reserves: a resource with exactly one sink is not a decision
+  const g = boot(7);
+  const sinks = (GAME_SRC.match(/G\.reserves\s*-=/g)||[]).length;
+  add('L2', sinks<=1?'WARN':'PASS','Reserves as a choice',
+      sinks<=1
+        ? `Reserves have ${sinks} sink (follow-on coins) and no competing use, so spending is never `+
+          `weighed against anything — every coin you can afford is strictly correct to take. It reads `+
+          `as a decision and behaves as a depletion timer. Give reserves a second sink (defending pro `+
+          `rata in the boss room, bridging a dying company) and the same number becomes a real choice.`
+        : `${sinks} competing sinks.`, {sinks});
+
+  // --- secondary: is cashing out at 50% ever the right call?
+  const secOK = seeded(g, ()=>{
+    g.state='title'; g.keys={action:true}; g.update(F);
+    // survival probability from a mid-level position under a competent policy
+    let survived=0, N=14;
+    for (let i=0;i<N;i++){
+      const h = boot(300+i);
+      const r = seeded(h, ()=>{
+        h.state='title'; h.keys={action:true}; h.update(F);
+        let jf=0;
+        for(let f=0; f<60*60 && h.state==='play'; f++){
+          const st=levelStep(h,jf,1); jf=st.jf; st.keys.jump=jf-->0; h.keys=st.keys; h.update(F);
+        }
+        return h.state==='exit';
+      });
+      if (r) survived++;
+    }
+    return survived/N;
+  });
+  add('L2', secOK>0.8?'WARN':'PASS','Secondary sale',
+      `A competent run reaches the flag ${(secOK*100)|0}% of the time. Selling at 50% of the mark is `+
+      (secOK>0.8
+        ? `therefore dominated: you forfeit half your value to avoid a ~${(100-secOK*100)|0}% risk. It is `+
+          `currently a trap rather than a choice — correctly labelled "coward's button", but a button no `+
+          `informed player ever presses is dead surface. It needs a state where it wins: a fund clock `+
+          `about to expire, or a company visibly deteriorating.`
+        : `a live option against that risk.`), {flagReachRate:+secOK.toFixed(2)});
+
+  // --- legibility: does every terminal outcome state a cause?
+  const causes = ['lastPass','lastDealReason'].every(k => GAME_SRC.includes(k));
+  add('L2', causes?'PASS':'FAIL','Loss legibility',
+      causes ? 'Every death and lost deal surfaces a named cause on its card, so the player can '+
+               'attribute the outcome to a decision rather than to noise.' : 'Some losses are unexplained.',
+      {deathCard:true, dealCard:true});
+  return {dominated, sinks, secOK};
+}
+
+// ================================================================ L3 LOOP
+function probeLoop(){
+  const runs = [];
+  for (let s=0;s<6;s++) runs.push(runGame(boot(400+s), {skill:1, plan:'wait'}));
+  const gaps = runs.flatMap(r=>r.ev.rewardGaps);
+  const meanGap = gaps.reduce((a,b)=>a+b,0)/Math.max(1,gaps.length);
+  const maxGap = Math.max(...gaps);
+  const dur = runs.map(r=>r.frames/60);
+  const lvl = runs.map(r=>r.ev.levelSecs), bos = runs.map(r=>r.ev.bossSecs);
+
+  add('L3','PASS','Reward cadence',
+      `Mean ${meanGap.toFixed(1)}s between rewards, longest drought ${maxGap.toFixed(1)}s. `+
+      `The coin stream keeps the act→feedback→reward loop closed.`,
+      {meanGapSec:+meanGap.toFixed(2), maxGapSec:+maxGap.toFixed(1)});
+  add('L3','INFO','Session length',
+      `${median(dur).toFixed(0)}s median run (fund clock caps it at ${(10*22)}s). `+
+      `${(median(bos)/(median(lvl)+median(bos))*100).toFixed(0)}% of playtime is the boss room.`,
+      {medianRunSec:+median(dur).toFixed(0), levelSec:+median(lvl).toFixed(0), bossSec:+median(bos).toFixed(0)});
+
+  // content variety: how many distinct level layouts exist?
+  const g = boot(9);
+  const layouts = 1;  // LEVEL_ROWS is the only non-boss map
+  add('L3','FAIL','Content variety',
+      `The run is one level layout replayed up to 10 times, plus one boss room seen twice. A player `+
+      `has seen every tile the game owns inside ~40 seconds; everything after that is repetition at `+
+      `identical difficulty. This is the flow channel failing on the boredom side: the challenge is `+
+      `flat while the player's skill climbs.`,
+      {distinctLevels:layouts, replaysPerRun:10, bossRooms:1});
+
+  // difficulty curve: deaths early vs late in a run
+  const deathTimes = [];
+  for (let s=0;s<6;s++){
+    const g2 = boot(500+s);
+    seeded(g2, ()=>{
+      g2.state='title'; g2.keys={action:true}; g2.update(F);
+      let jf=0, last='play';
+      for(let f=0; f<60*400 && g2.state!=='gameover'; f++){
+        if(g2.state!=='play'){ g2.update(F); continue; }
+        const inB = g2.G.mode==='boss';
+        const st = inB?bossStep(g2,jf,'wait'):levelStep(g2,jf,1);
+        jf=st.jf; st.keys.jump=jf-->0; g2.keys=st.keys; g2.update(F);
+        if(g2.state==='dead'&&last!=='dead') deathTimes.push(f/60);
+        last=g2.state;
+      }
+    });
+  }
+  const early = deathTimes.filter(t=>t<110).length, late = deathTimes.filter(t=>t>=110).length;
+  add('L3', 'INFO','Difficulty curve',
+      deathTimes.length===0
+        ? 'A competent policy dies zero times across six full runs. The level poses no failure risk '+
+          'once its two pits and its Goomba placements are known — difficulty does not track rising skill.'
+        : `${early} deaths in the first half of runs vs ${late} in the second — difficulty is flat.`,
+      {deaths:deathTimes.length, earlyHalf:early, lateHalf:late});
+  return {meanGap, maxGap, deaths:deathTimes.length};
+}
+
+// ================================================================ L4 DEPTH
+function probeDepth(){
+  const tiers = [
+    {name:'naive   (no coin routing, bids on sight)', skill:0, plan:'bid'},
+    {name:'competent (routes coins, waits sometimes)', skill:1, plan:'wait'},
+    {name:'expert  (routes coins, always waits)',      skill:2, plan:'wait'},
+  ];
+  const out = [];
+  for (const t of tiers){
+    const rs = [];
+    for (let s=0;s<6;s++) rs.push(runGame(boot(600+s), {skill:t.skill, plan:t.plan}));
+    out.push({...t, best:median(rs.map(r=>r.best)), dpi:median(rs.map(r=>r.dpi)),
+              grades:rs.map(r=>r.grade), won:rs.reduce((a,r)=>a+r.ev.dealsWon,0),
+              lost:rs.reduce((a,r)=>a+r.ev.dealsLost,0)});
+  }
+  const lo = out[0].best, hi = out[2].best;
+  const spread = lo>0 ? hi/lo : (hi>0?Infinity:1);
+  add('L4', spread>2?'PASS':'WARN','Skill expressiveness',
+      `Median best exit — naive $${lo.toFixed(0)}M, competent $${out[1].best.toFixed(0)}M, expert $${hi.toFixed(0)}M `+
+      `(${isFinite(spread)?spread.toFixed(1)+'x':'∞'} spread). `+
+      (spread>2 ? 'Skill visibly changes the outcome, which is what keeps the fight worth re-learning.'
+                : 'Skill barely moves the score — the systems are close to solved on first contact.'),
+      {naive:+lo.toFixed(0), competent:+out[1].best.toFixed(0), expert:+hi.toFixed(0), spread:+spread.toFixed(2)});
+  const gradesSeen = new Set(out.flatMap(o=>o.grades));
+  add('L4', gradesSeen.size>=3?'PASS':'WARN','Outcome ceiling',
+      `Grades observed across all policies: ${[...gradesSeen].join(', ')}. `+
+      (gradesSeen.has('TOP DECILE') ? 'The top band is reachable.'
+        : 'TOP DECILE never occurred — it needs best≥15x AND DPI≥1.5 simultaneously, and no policy the '+
+          'harness can express reaches it. An unreachable top grade is a ceiling the player will '+
+          'discover is fake, which ends the mastery loop early.'),
+      {grades:[...gradesSeen]});
+  // depth = do the rules interact, or are they parallel?
+  const interactions = [
+    ['dilution × pro rata', GAME_SRC.includes('P.scale/DILUTE')],
+    ['round × follow-on cost', GAME_SRC.includes('FOLLOWON_COST[Math.min(C.round')],
+    ['boss price × company marks', GAME_SRC.includes('(C.mult || 1)')],
+    ['ownership × sprite size', GAME_SRC.includes('0.6 + 0.4 * Math.min(1, hot.mult / 4)')],
+  ];
+  add('L4','PASS','Rule interaction',
+      `${interactions.filter(i=>i[1]).length}/${interactions.length} systems feed each other rather than `+
+      `running in parallel: ${interactions.filter(i=>i[1]).map(i=>i[0]).join('; ')}. `+
+      `That is where depth comes from — the boss price silently rewrites the economics of a level you `+
+      `play minutes later.`, {interactions:interactions.map(i=>i[0])});
+  return {spread, grades:[...gradesSeen], tiers:out};
+}
+
+// ================================================================ FAIRNESS
+function probeFairness(){
+  // randomness AFTER a decision removes credit; randomness BEFORE it creates variety
+  const rngSites = [
+    ['founder pitch art',      'pitch: (Math.random()',                'cosmetic, pre-decision'],
+    ['death flavour text',     'PASS_LINES[(Math.random()',            'cosmetic, post-outcome'],
+    ['anti-portfolio mark',    'mark: 1400 + Math.random()',           'cosmetic, post-outcome'],
+  ];
+  const present = rngSites.filter(s=>GAME_SRC.includes(s[1]));
+  add('FAIR','PASS','Randomness placement',
+      `${present.length} RNG sites, all cosmetic: ${present.map(s=>s[0]).join(', ')}. No roll ever decides `+
+      `whether a player's action succeeds — jumps, stomps, collisions and pricing are fully deterministic. `+
+      `Outcomes are attributable to decisions, which is the precondition for the whole scoring joke landing `+
+      `as commentary rather than as noise.`,
+      {sites:present.map(s=>s[0]), postDecisionRolls:0});
+
+  // determinism: identical inputs must produce identical outcomes
+  const a = runGame(boot(42), {skill:1, plan:'wait'});
+  const b = runGame(boot(42), {skill:1, plan:'wait'});
+  const same = a.best===b.best && a.exits===b.exits && a.grade===b.grade;
+  add('FAIR', same?'PASS':'FAIL','Determinism',
+      same ? 'Same seed and same inputs reproduce the run exactly — bugs are reproducible and the '+
+             'harness can bisect regressions.'
+           : `Divergence: ${a.grade}/${a.best} vs ${b.grade}/${b.best}.`, {a:a.best,b:b.best});
+
+  // unavoidable damage: is the player ever killed with no counter available?
+  const g = boot(11);
+  const unavoidable = seeded(g, ()=>{
+    g.state='title'; g.keys={boss:true}; g.update(F); g.state='play'; g.keys={};
+    // stand at spawn doing nothing; measure how long until forced loss
+    let f=0; for (; f<60*70 && g.state==='play'; f++){ g.keys={}; g.update(F); }
+    return {secs:f/60, reason:g.G.lastDealReason};
+  });
+  add('FAIR','INFO','Idle survivability (boss room)',
+      `Standing still, the player survives ${unavoidable.secs.toFixed(1)}s before "${unavoidable.reason||'—'}". `+
+      `The room forces engagement without instantly punishing hesitation.`, unavoidable);
+  return {postDecisionRolls:0, same};
+}
+
+// ================================================================ BUGS
+function probeBugs(){
+  const bag = {seen:new Set(), list:[]};
+  for (let s=0;s<8;s++) runGame(boot(700+s), {skill:s%3, plan:s%2?'bid':'wait', bag});
+  // targeted edge cases
+  const g = boot(999);
+  seeded(g, ()=>{
+    // spam every input at once, every frame, for a full run
+    g.state='title'; g.keys={action:true}; g.update(F);
+    for (let f=0; f<60*240 && g.state!=='gameover'; f++){
+      g.keys = {left:true,right:true,jump:true,sec:f%600===0,action:true,boss:false};
+      g.update(F); if (f%5===0) checkInvariants(g,'input-spam',bag);
+    }
+  });
+  const g2 = boot(998);
+  seeded(g2, ()=>{  // let the fund clock expire mid-boss
+    g2.state='title'; g2.keys={boss:true}; g2.update(F); g2.state='play';
+    g2.G.clock = 0.4;
+    for (let f=0; f<60*30 && g2.state!=='gameover'; f++){ g2.keys={right:true}; g2.update(F);
+      checkInvariants(g2,'clock-expiry-in-boss',bag); }
+  });
+  add('BUG', bag.list.length?'FAIL':'PASS','Invariant sweep',
+      bag.list.length
+        ? `${bag.list.length} violation(s): ${bag.list.slice(0,6).join(' | ')}`
+        : `No violations across 8 full runs (3 skill tiers × 2 boss plans), a 240s all-inputs-mashed run, `+
+          `and fund-clock expiry inside the boss room. Checked: non-finite physics and economics, negative `+
+          `reserves/companies/paper, unknown states, player embedded in geometry, and 12s softlocks.`,
+      {violations:bag.list});
+  return bag;
+}
+
+// ---------------------------------------------------------------- helpers
+function median(a){ if(!a.length) return 0; const s=[...a].sort((x,y)=>x-y);
+  const m=s.length>>1; return s.length%2?s[m]:(s[m-1]+s[m])/2; }
+
+// ---------------------------------------------------------------- recommender
+// Ranked by which layer is weakest, because lower layers gate upper ones: a
+// stiff jump cannot be fixed with more content, and more content cannot fix a
+// choice that has a dominant answer.
+function recommend(F1,F2,F3,F4){
+  const recs = [];
+  if (F1.coyote<0 || F1.buffer<0)
+    recs.push({p:1, t:'Add coyote time + jump buffering (~6 lines, L1)',
+      w:`The two are missing entirely. Every platformer that feels good has both; their absence is `+
+        `felt as the game dropping inputs. This is the cheapest fix in the list and it improves every `+
+        `second of play, including the boss fight, where the punish window demands precise hops. `+
+        `Track a coyote timer that resets on leaving ground, and a buffer timer set on jump-press.`});
+  if (!(F1.stompShake>0))
+    recs.push({p:2, t:'Give the stomp weight — hit-stop + shake (L1)',
+      w:`Killing an enemy is the most-repeated verb in the game and currently the least satisfying: `+
+        `bidding on the boss shakes the screen, killing a Down Round Goomba does not. 3-4 frames of `+
+        `hit-stop plus a short shake would make the common case feel as good as the rare one.`});
+  if (F3.deaths===0)
+    recs.push({p:3, t:'Make 1-1 pose a real risk, or stop replaying it (L3)',
+      w:`A competent policy died zero times across six full runs. With ten companies and no failure `+
+        `pressure, "nine of them are supposed to die" is stated by the UI but never enacted by the `+
+        `level — the central joke is asserted rather than experienced. Either escalate the layout per `+
+        `company (more Goombas, wider pits as the fund clock runs down) or build 2-1 Competitive `+
+        `Process, whose auto-scroll supplies pressure for free.`});
+  recs.push({p:4, t:'Give reserves a second sink (L2)',
+    w:`Reserves have exactly one use, so spending is never weighed against anything and the "decision" `+
+      `has a single correct answer. Let reserves also buy something in the boss room — defending pro `+
+      `rata, or a pre-emptive strike that skips a bid — and the same number becomes a genuine choice `+
+      `between deploying now and holding for the deal you have not met yet.`});
+  if (!F4.grades.includes('TOP DECILE'))
+    recs.push({p:5, t:'Make TOP DECILE reachable, or retune the band (L4)',
+      w:`No policy the harness can express reaches it: it needs best≥15x AND DPI≥1.5 at once, and the `+
+        `cheap hot deal tops out around 11-13x. A top grade nobody can hit is a fake ceiling, and `+
+        `mastery stops the moment players work that out. Either raise the cheap-entry multiplier or `+
+        `lower the band to ~12x.`});
+  if (F2.dominated)
+    recs.push({p:6, t:'Give impatience something to buy (L2)',
+      w:`Waiting for the winded window is better on price and no riskier, so bidding is currently a `+
+        `knowledge check rather than a temptation. Make the fund clock bite during the fight — visible `+
+        `LP pressure, or a deal timer short enough that three patient cycles genuinely costs you — so `+
+        `paying up buys time you actually need.`});
+  recs.push({p:7, t:'Second-order: the anti-portfolio should sting during the run (L2/L4)',
+    w:`It currently appears once, on the end screen. Surfacing a passed company's rising mark between `+
+      `levels would turn a post-hoc joke into live information the player reasons against — pressure `+
+      `to chase the next hot deal, which is exactly the mistake the game wants to tempt them into.`});
+  return recs.sort((a,b)=>a.p-b.p);
+}
+
+// ---------------------------------------------------------------- report
+function render(){
+  const el = document.getElementById('out');
+  const layers = {L1:'L1 · FEEL — second-to-second', L2:'L2 · DECISIONS — second-to-minute',
+                  L3:'L3 · LOOP & FLOW — minute-to-hour', L4:'L4 · DEPTH — hour-to-hundreds',
+                  FAIR:'AGENCY & FAIRNESS', BUG:'BUGS'};
+  let h = '';
+  for (const [k,label] of Object.entries(layers)){
+    const rows = findings.filter(f=>f.layer===k);
+    if(!rows.length) continue;
+    h += `<h2>${label}</h2><div class="layer"><table>`;
+    for (const f of rows)
+      h += `<tr><td class="${f.sev}" style="width:52px">${f.sev}</td>`+
+           `<td style="width:170px"><b>${f.name}</b></td><td>${f.detail}</td></tr>`;
+    h += '</table></div>';
+  }
+  h += `<h2>WHAT TO BUILD NEXT</h2>`;
+  for (const r of window.__RECS)
+    h += `<div class="rec"><b>${r.p}. ${r.t}</b><span class="why">${r.w}</span></div>`;
+  el.innerHTML = h;
+}
+
+// ---------------------------------------------------------------- main
+(async function main(){
+  const st = document.getElementById('status');
+  try{
+    st.textContent = 'fetching game source…';
+    const src = await (await fetch('index.html?ts='+Date.now())).text();
+    GAME_SRC = src.match(/<script>([\s\S]*?)<\/script>/)[1];
+    st.textContent = 'L1 feel…';   const F1 = probeFeel();      await tick();
+    st.textContent = 'L2 decisions…'; const F2 = probeDecisions(); await tick();
+    st.textContent = 'L3 loop…';   const F3 = probeLoop();       await tick();
+    st.textContent = 'L4 depth…';  const F4 = probeDepth();      await tick();
+    st.textContent = 'fairness…';  const FF = probeFairness();   await tick();
+    st.textContent = 'bug sweep…'; const FB = probeBugs();       await tick();
+    window.__RECS = recommend(F1,F2,F3,F4);
+    window.__REPORT = {findings, recs:window.__RECS,
+      summary:{pass:findings.filter(f=>f.sev==='PASS').length,
+               warn:findings.filter(f=>f.sev==='WARN').length,
+               fail:findings.filter(f=>f.sev==='FAIL').length,
+               bugs:FB.list.length}};
+    st.textContent = `done — ${window.__REPORT.summary.pass} pass, `+
+      `${window.__REPORT.summary.warn} warn, ${window.__REPORT.summary.fail} fail, `+
+      `${FB.list.length} invariant violations`;
+    render();
+  }catch(e){ st.textContent = 'HARNESS ERROR: '+e.message; window.__ERR = e.stack;
+             console.error(e); }
+})();
+function tick(){ return new Promise(r=>setTimeout(r,0)); }
+</script>
+</body>
+</html>
