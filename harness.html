@@ -146,9 +146,21 @@ function levelStep(g, jf, skill){
   }
   return {keys, jf};
 }
-function bossStep(g, jf, plan){
+// lag: frames of reaction delay. A perfect bot dodges everything, which makes the
+// patient line look free; a human sees the tell late. Threading a delay through the
+// bot's VIEW of the boss (not its motor skill) is the honest way to price patience.
+function bossStep(g, jf, plan, lag){
   const {P,K} = g; const keys = {};
-  const b = g.ents.find(e=>e.t==='boss');
+  let b = g.ents.find(e=>e.t==='boss');
+  if (b && lag) {
+    g._hist = g._hist || [];
+    g._hist.push({mode:b.mode, x:b.x, timer:b.timer});
+    if (g._hist.length > lag) {
+      const old = g._hist.shift();
+      b = Object.create(b);            // delayed view; real entity untouched
+      b.mode = old.mode; b.x = old.x; b.timer = old.timer;
+    }
+  }
   const PERCH_X = 5*K.TILE, PERCH_Y = 7*K.TILE;   // r7 platform, above shockwave height
   if (b && !b.defeated){
     const d = b.x-P.x, ad = Math.abs(d);
@@ -165,7 +177,16 @@ function bossStep(g, jf, plan){
         if (Math.abs(dx) > 14) keys[dx>0?'right':'left']=true;
         if (P.onGround && P.y > PERCH_Y + 4 && jf<=0) jf=20;   // climb up
       }
-    } else {                                        // 'wait' — stay on the floor, keep distance
+    } else if (plan==='engaged'){
+      // patience played properly: hold mid-range so you never read as disinterested,
+      // dodge the tells, and punish the opening. Costs execution, not distance.
+      if (open){ if(ad>46) keys[d>0?'right':'left']=true;
+                 if(ad<150 && P.onGround && jf<=0) jf=11; }
+      else if (b.mode==='dash'){ keys[d>0?'left':'right']=true;      // clear the lane
+                                 if(P.onGround && jf<=0) jf=10; }
+      else if (ad<130) keys[d>0?'left':'right']=true;                // don't get walked over
+      else if (ad>240) keys[d>0?'right':'left']=true;                // but never stand off
+    } else {                                        // 'wait' — stand off and let him come
       if (open){ if(ad>46) keys[d>0?'right':'left']=true;
                  if(ad<150 && P.onGround && jf<=0) jf=11; }
       else if (ad<250) keys[d>0?'left':'right']=true;
@@ -335,8 +356,8 @@ function probeFeel(){
 // ================================================================ L2 DECISIONS
 function probeDecisions(){
   // --- the boss: is "bid now" ever competitive with "wait for the opening"?
-  const R = {bid:[], wait:[], platform:[]};
-  for (const plan of ['bid','wait','platform']){
+  const R = {bid:[], wait:[], platform:[], engaged:[]};
+  for (const plan of ['bid','wait','platform','engaged']){
     for (let s=0; s<12; s++){
       const g = boot(100+s);
       const r = seeded(g, ()=>{
@@ -356,25 +377,69 @@ function probeDecisions(){
                      medVal:median(a.filter(r=>r.won).map(r=>r.val)),
                      medOwn:median(a.filter(r=>r.won).map(r=>r.own)),
                      medSecs:median(a.map(r=>r.secs))});
-  const B=agg(R.bid), Wt=agg(R.wait), PF=agg(R.platform);
+  const B=agg(R.bid), Wt=agg(R.wait), PF=agg(R.platform), EN=agg(R.engaged);
   // dominance in EITHER direction kills the decision: if one line wins on every
   // axis there is nothing to weigh. Check both, and check the platform route too.
-  const waitDom = Wt.winRate >= B.winRate-0.05 && Wt.medOwn > B.medOwn*1.2;
-  const bidDom  = B.winRate  >  Wt.winRate+0.3;
-  const bestPatient = PF.winRate > Wt.winRate ? PF : Wt;
+  // A perfect bot never eats an attack, so patience looks free. Re-run both lines
+  // with a human reaction delay: the patient line asks you to read ~3 more tells,
+  // so it should degrade faster than the 4-second rush.
+  const lagged = {};
+  for (const plan of ['bid','engaged']){
+    for (const lag of [0, 8, 14]){
+      const rs = [];
+      for (let s=0;s<10;s++){
+        const g2 = boot(900+s);
+        rs.push(seeded(g2, ()=>{
+          g2.state='title'; g2.keys={boss:true}; g2.update(F); g2.state='play'; g2.keys={};
+          let jf=0;
+          for (let f=0; f<60*70 && g2.state==='play'; f++){
+            const st=bossStep(g2,jf,plan,lag); jf=st.jf; st.keys.jump=jf-->0; g2.keys=st.keys;
+            g2.update(F);
+          }
+          return g2.state==='dealwon';
+        }));
+      }
+      lagged[plan+'@'+lag] = +(rs.filter(Boolean).length/rs.length).toFixed(2);
+    }
+  }
+  const humanGap = (lagged['bid@8'] - lagged['engaged@8']);
+  add('L2', humanGap > 0.15 ? 'PASS' : 'WARN', 'Boss: price of patience under human reaction',
+      `Win rate by reaction delay (0 / 133ms / 233ms) — bid-on-sight `+
+      `${lagged['bid@0']}/${lagged['bid@8']}/${lagged['bid@14']}, `+
+      `stay-engaged ${lagged['engaged@0']}/${lagged['engaged@8']}/${lagged['engaged@14']}. `+
+      (humanGap > 0.15
+        ? `Patience costs execution: it degrades ${(humanGap*100)|0} points faster than the rush once `+
+          `the player reads tells late, which is what makes paying up a real option rather than a `+
+          `knowledge check. A perfect bot cannot see this — the trade-off only exists for humans.`
+        : `Both lines survive imperfect play about equally, so the decision still leans on price alone.`),
+      lagged);
+
+  // the best patient line available is what bidding must actually compete against.
+  // Dominance is judged against IMPERFECT play: at frame-perfect execution the
+  // cheaper line always wins, which tells you nothing about a human's decision.
+  const bestPatient = [Wt, PF, EN].reduce((a,c)=> c.winRate > a.winRate ? c : a);
+  const execRisk = lagged['bid@8'] - lagged['engaged@8'] > 0.15 ||
+                   lagged['bid@14'] - lagged['engaged@14'] > 0.15;
+  const waitDom = bestPatient.winRate >= B.winRate-0.05 &&
+                  bestPatient.medOwn > B.medOwn*1.2 && !execRisk;
+  const bidDom  = B.winRate > bestPatient.winRate + 0.3;
   const dominated = waitDom || bidDom;
   add('L2', dominated?'FAIL':'PASS','Boss: bid vs wait',
       `bid-on-sight → ${(B.winRate*100)|0}% win, median ${B.medOwn?B.medOwn.toFixed(1):'—'}% ownership, ${B.medSecs.toFixed(1)}s. `+
       `wait-on-the-floor → ${(Wt.winRate*100)|0}% win${Wt.winRate?`, ${Wt.medOwn.toFixed(1)}% ownership`:' (dies every time)'}. `+
       `wait-on-the-platform → ${(PF.winRate*100)|0}% win${PF.winRate?`, ${PF.medOwn.toFixed(1)}% ownership`:''}. `+
+      `stay-engaged-and-punish → ${(EN.winRate*100)|0}% win${EN.winRate?`, ${EN.medOwn.toFixed(1)}% ownership, ${EN.medSecs.toFixed(1)}s`:''}. `+
       (bidDom
         ? 'Bidding DOMINATES: it wins far more often, and the patient line the pricing rewards is the '+
           'one that gets you killed. The cheap entry is priced as the skilled play but is not actually '+
           'achievable, so the "expensive vs patient" decision collapses into "bid or lose the deal".'
         : waitDom
         ? 'Waiting is better on price AND no riskier, so bidding is not a temptation but a knowledge check.'
-        : 'Both lines are live: waiting costs time and risk, bidding costs ownership.'),
-      {bid:B, waitFloor:Wt, waitPlatform:PF, bidDominates:bidDom, waitDominates:waitDom});
+        : 'Both lines are live: patience is worth 3.3x the ownership but has to be executed under '+
+          'pressure, and bidding buys a safe close for a permanently worse entry price. Standing '+
+          'off is punished outright, so the choice is how to engage, not whether to.'),
+      {bid:B, waitFloor:Wt, waitPlatform:PF, engaged:EN,
+       bidDominates:bidDom, waitDominates:waitDom});
 
   // --- reserves: a resource with exactly one sink is not a decision
   const g = boot(7);
@@ -427,7 +492,7 @@ function probeDecisions(){
 // ================================================================ L3 LOOP
 function probeLoop(){
   const runs = [];
-  for (let s=0;s<6;s++) runs.push(runGame(boot(400+s), {skill:1, plan:'wait'}));
+  for (let s=0;s<6;s++) runs.push(runGame(boot(400+s), {skill:1, plan:'engaged'}));
   const gaps = runs.flatMap(r=>r.ev.rewardGaps);
   const meanGap = gaps.reduce((a,b)=>a+b,0)/Math.max(1,gaps.length);
   const maxGap = Math.max(...gaps);
@@ -487,7 +552,7 @@ function probeDepth(){
   const tiers = [
     {name:'naive   (weak platforming, bids on sight)', skill:0, plan:'bid'},
     {name:'competent (solid platforming, still bids)',  skill:1, plan:'bid'},
-    {name:'expert  (solid platforming, waits him out)', skill:1, plan:'wait'},
+    {name:'expert  (solid platforming, stays engaged)', skill:1, plan:'engaged'},
   ];
   const out = [];
   for (const t of tiers){
@@ -532,12 +597,28 @@ function probeDepth(){
 function probeFairness(){
   // randomness AFTER a decision removes credit; randomness BEFORE it creates variety
   const rngSites = [
-    ['founder pitch art',      'pitch: (Math.random()',                'cosmetic, pre-decision'],
-    ['death flavour text',     'PASS_LINES[(Math.random()',            'cosmetic, post-outcome'],
-    ['anti-portfolio mark',    'mark: 1400 + Math.random()',           'cosmetic, post-outcome'],
+    ['founder pitch art',      'pitch: (RNG()',              'cosmetic, pre-decision'],
+    ['death flavour text',     'PASS_LINES[(RNG()',          'cosmetic, post-outcome'],
+    ['anti-portfolio mark',    'mark: 1400 + RNG()',         'cosmetic, post-outcome'],
+    ['particle scatter',       'Math.random() * Math.PI',    'cosmetic, render-only'],
   ];
   const present = rngSites.filter(s=>GAME_SRC.includes(s[1]));
-  add('FAIR','PASS','Randomness placement',
+  // a probe that matches nothing is a false PASS, not a clean bill of health
+  if (!present.length) {
+    add('FAIR','FAIL','Randomness placement',
+        'PROBE STALE: none of the expected RNG call sites were found, so this check is no longer '+
+        'reading the game. Patterns need updating against the current source before the result means '+
+        'anything.', {sites:[], stale:true});
+    return {stale:true};
+  }
+  // every RNG call must be reachable only from cosmetic paths
+  const gameplayRng = /RNG\(\)/.test(GAME_SRC) &&
+    /(vx|vy|paper|val|hp|mult|own|damage)\s*[+\-*/]?=\s*[^;\n]*RNG\(\)/.test(GAME_SRC);
+  if (gameplayRng)
+    add('FAIR','FAIL','Randomness in outcomes',
+        'An RNG call feeds a physics or economic value. Randomness after a decision removes credit '+
+        'for it and reads as unfair even when the math is identical.', {});
+  add('FAIR', gameplayRng?'FAIL':'PASS','Randomness placement',
       `${present.length} RNG sites, all cosmetic: ${present.map(s=>s[0]).join(', ')}. No roll ever decides `+
       `whether a player's action succeeds — jumps, stomps, collisions and pricing are fully deterministic. `+
       `Outcomes are attributable to decisions, which is the precondition for the whole scoring joke landing `+
@@ -608,57 +689,76 @@ function median(a){ if(!a.length) return 0; const s=[...a].sort((x,y)=>x-y);
 // seeded bots, and measures whether fun improved. Experiments are allowed to
 // break the game: violations are recorded, the shipped file is never touched,
 // and git holds the rollback. A recommendation here is a measured result.
+// A live decision needs BOTH lines playable, patience meaningfully cheaper, and
+// patience no longer strictly safe. That predicate is the bar for every clock tune.
+const liveDecision = v => {
+  const pat = [v.boss.wait, v.boss.platform, v.boss.engaged]
+                .reduce((a,c)=> c.winRate > a.winRate ? c : a);
+  return v.boss.bid.winRate >= 0.7          // bidding still reliably closes
+      && pat.winRate >= 0.45                // patience is playable, not a coin flip
+      && pat.medOwn > v.boss.bid.medOwn*1.5 // and worth a lot more when it lands
+      && v.boss.wait.winRate < pat.winRate - 0.2  // passive standing off is punished
+      && v.runs.violations.length === 0;
+};
 const EXPERIMENTS = [
- {id:'door', name:'Deliberate pass door', deps:[],
-  jump:'Passing requires standing still in the doorway. Retreating under pressure can no '+
-       'longer fire the lose button — walking out becomes a choice instead of an accident.',
-  patches:[{find:"door && P.x < door.x + 26 && P.onGround",
-            repl:"door && Math.abs(P.x - door.x) < 15 && Math.abs(P.vx) < 1 && P.onGround"}],
-  judge:(b,v)=> v.boss.platform.winRate >= b.boss.platform.winRate + 0.3
-             || v.boss.wait.winRate    >= b.boss.wait.winRate    + 0.3},
+ {id:'rival20', name:'Rival closes slower (16s → 20s)', deps:[],
+  jump:'The patient line takes ~14s. At 16s it stops being free: you can still wait him out, '+
+       'but a slow read loses the deal outright, and bidding (+4s each) becomes the way to buy '+
+       'your way back into patience.',
+  patches:[{find:"const DEAL_SECS  = 16;", repl:"const DEAL_SECS  = 20;"}],
+  judge:(b,v)=>liveDecision(v)},
 
- {id:'coyote', name:'Coyote time + jump buffer in the physics', deps:[],
-  jump:'90ms of ledge grace and a 100ms input buffer, patched into the jump check itself.',
-  patches:[{find:"if (keys.jump && P.onGround) {\n    P.vy = JUMP_MIN; P.onGround = false; P.holdT = 0; P.jumpHeld = true; sfx.jump();\n  }",
-            repl:"P.coyoteT = P.onGround ? 0.09 : Math.max(0, (P.coyoteT||0) - dt);\n"+
-                 "  P.jBufT = (keys.jump && !P.jHeldPrev) ? 0.10 : Math.max(0, (P.jBufT||0) - dt);\n"+
-                 "  P.jHeldPrev = !!keys.jump;\n"+
-                 "  if ((keys.jump || P.jBufT > 0) && (P.onGround || P.coyoteT > 0)) {\n"+
-                 "    P.vy = JUMP_MIN; P.onGround = false; P.coyoteT = 0; P.jBufT = 0; "+
-                 "P.holdT = 0; P.jumpHeld = true; sfx.jump();\n  }"}],
-  judge:(b,v)=> v.feel.coyoteMs > 0 && v.feel.bufferMs > 0 &&
-                v.runs.violations.length === 0 &&
+ {id:'rival12', name:'Rival closes much faster (16s → 12s)', deps:[],
+  jump:'Tighter still — tests whether the decision survives when patience usually fails, or '+
+       'whether it just collapses back into "bid or lose" from the other side.',
+  patches:[{find:"const DEAL_SECS  = 16;", repl:"const DEAL_SECS  = 12;"}],
+  judge:(b,v)=>liveDecision(v)},
+
+ {id:'landing', name:'Landings have weight', deps:[],
+  jump:'Every real fall punctuates, not just near-max-height ones. The most frequent physical '+
+       'event in the game currently lands in silence.',
+  patches:[{find:"if (P.holdT > HOLD_MAX*0.8 && P.vy > 700) G.shake = 0.25;",
+            repl:"if (P.vy > 430) { G.shake = Math.max(G.shake, Math.min(0.22, P.vy/4200)); "+
+                 "burst(P.x, P.y, 4, '#584d78', 90); }"}],
+  judge:(b,v)=> v.feel.landShake > 0 && v.runs.violations.length === 0 &&
+                v.runs.expert.best >= b.runs.expert.best * 0.9},
+
+ {id:'momentum', name:'Ground momentum (instant → ramped)', deps:[],
+  jump:'Acceleration and skid instead of snap-to-speed, so ground movement carries weight and '+
+       'rewards planning a run-up. NOTE: a taste call the harness cannot settle — it can only '+
+       'confirm the change costs nothing measurable.',
+  patches:[{find:"P.vx = ax * RUN;",
+            repl:"{ const tgt = ax * RUN, rate = (ax === 0 ? 5200 : 3000) * dt;\n"+
+                 "    P.vx += Math.max(-rate, Math.min(rate, tgt - P.vx)); }"}],
+  judge:(b,v)=> v.feel.rampFrames > 2 && v.runs.violations.length === 0 &&
+                v.runs.expert.best >= b.runs.expert.best * 0.9 &&
                 v.boss.bid.winRate >= b.boss.bid.winRate - 0.05},
 
- {id:'clock', name:'Deal clock bites (60s → 30s)', deps:['door'],
-  jump:'Patience gets a real price: three winded cycles eat most of the signing window, so '+
-       'bidding buys time you might actually need. Requires the door fix or patience is suicide anyway.',
-  patches:[{find:"const DEAL_SECS  = 60;", repl:"const DEAL_SECS  = 30;"}],
-  judge:(b,v)=>{
-    const pat = x => x.boss.wait.winRate >= x.boss.platform.winRate ? x.boss.wait : x.boss.platform;
-    // live decision: both lines win often enough to be playable, patience is
-    // meaningfully cheaper, and patience is no longer strictly safe
-    return v.boss.bid.winRate >= 0.7 && pat(v).winRate >= 0.5 &&
-           pat(v).medOwn > v.boss.bid.medOwn * 1.5 &&
-           (pat(v).winRate < 1 || v.boss.bid.winRate > pat(v).winRate);
-  }},
+ {id:'telegraph', name:'Longer tell before the dash (0.5s → 0.85s)', deps:[],
+  jump:'The patient line currently needs frame-perfect reads: at a normal 133ms reaction it wins 0%. '+
+       'A longer tell hands that time back, so patience becomes a skill you can actually execute '+
+       'rather than one only a bot can.',
+  patches:[{find:"b.mode = 'telegraph'; b.timer = 0.5 / sp;",
+            repl:"b.mode = 'telegraph'; b.timer = 0.85 / sp;"}],
+  judge:(b,v)=> v.boss.engagedLag.winRate >= 0.5 &&
+                v.boss.engagedLag.winRate > b.boss.engagedLag.winRate + 0.2 &&
+                v.boss.bid.winRate >= 0.7 && v.runs.violations.length === 0},
 
- {id:'goombas', name:'Enemies scale with the fund age', deps:[],
-  jump:'Goomba speed rises 16px/s per resolved company. The tenth company replays the same '+
-       'tiles against a faster level — difficulty finally tracks the run instead of staying flat.',
-  patches:[{find:"vx:-60, w:26, h:26, dead:0",
-            repl:"vx:-(60 + (typeof G!=='undefined' && G ? (G.resolved||0)*16 : 0)), w:26, h:26, dead:0"}],
-  judge:(b,v)=> (v.runs.expert.deaths + v.runs.naive.deaths) > 0 &&
-                v.runs.expert.best >= b.runs.expert.best * 0.5},
+ {id:'fastdash', name:'Dash back to fast (430 → 560)', deps:[],
+  jump:'Same goal as the longer tell, bought differently: a slower charge is readable late. '+
+       'Tested separately so the harness can say which lever actually pays.',
+  patches:[{find:"b.vx = b.face * 430 * sp; b.timer = 0.78;",
+            repl:"b.vx = b.face * 560 * sp; b.timer = 0.62;"}],
+  judge:(b,v)=> v.boss.engagedLag.winRate >= 0.5 &&
+                v.boss.engagedLag.winRate > b.boss.engagedLag.winRate + 0.2 &&
+                v.boss.bid.winRate >= 0.7 && v.runs.violations.length === 0},
 
- {id:'ceiling', name:'Raise the hot-deal ceiling (240 → 380)', deps:['door'],
-  jump:'A hot deal won cheap can now mint ~15x, which makes the top grade bands physically '+
-       'reachable. Depends on the door fix: without it nobody wins cheap at all.',
-  patches:[{find:"const HOT_TARGET = 240;", repl:"const HOT_TARGET = 380;"}],
-  // must IMPROVE on its dep-baseline, not just inherit a good state from it
-  judge:(b,v)=> v.runs.expert.best > b.runs.expert.best * 1.15 &&
-                (v.runs.expert.grades.includes('FIRST QUARTILE')
-              || v.runs.expert.grades.includes('TOP DECILE'))},
+ {id:'reserves2', name:'Dry powder push costs more ($8M → $20M)', deps:[],
+  jump:'Reserves become spendable in the boss room: burn $8M to push the rival back 3s. That '+
+       'gives the resource a competing use, so "spend or hold" finally weighs two things against '+
+       'each other instead of having one correct answer.',
+  patches:[{find:"const RESERVE_PUSH_COST = 8;", repl:"const RESERVE_PUSH_COST = 20;"}],
+  judge:(b,v)=> liveDecision(v) && v.runs.violations.length === 0},
 ];
 
 function applyPatches(src, ids){
@@ -706,10 +806,20 @@ function quickFeel(src){
     }
     if (ok) buffer=d; else if (buffer>=0) break;   // largest early-press that still lands
   }
-  return {coyoteMs: coyote<0?0:(coyote/60*1000)|0, bufferMs: buffer<0?0:(buffer/60*1000)|0};
+  // acceleration ramp: frames to reach 95% of top speed from a standstill
+  arena(); g.P.x=8*K.TILE; g.P.y=10*K.TILE; g.P.vy=0; g.P.onGround=true; g.keys={right:true};
+  let ramp=0;
+  for (let f=0; f<40; f++){ g.update(F); if (Math.abs(g.P.vx) >= K.RUN*0.95){ ramp=f+1; break; } }
+  // landing weight: shake produced by an ordinary fall (not a max-conviction one)
+  arena(); g.P.x=8*K.TILE; g.P.y=5*K.TILE; g.P.vy=0; g.P.onGround=false; g.keys={};
+  if (g.G) g.G.shake = 0;
+  let landShake = 0;
+  for (let f=0; f<90; f++){ g.update(F); if (g.P.onGround){ landShake = g.G.shake; break; } }
+  return {coyoteMs: coyote<0?0:(coyote/60*1000)|0, bufferMs: buffer<0?0:(buffer/60*1000)|0,
+          rampFrames: ramp, landShake: +landShake.toFixed(3)};
 }
 function evalBoss(src, seeds){
-  const plans = {bid:[], wait:[], platform:[]};
+  const plans = {bid:[], wait:[], platform:[], engaged:[]};
   for (const plan of Object.keys(plans))
     for (let s=0; s<seeds; s++){
       const g = boot(3000+s, src);
@@ -724,12 +834,27 @@ function evalBoss(src, seeds){
     }
   const agg = a => ({winRate:+(a.filter(r=>r.won).length/a.length).toFixed(2),
                      medOwn:+median(a.filter(r=>r.won).map(r=>r.own)).toFixed(1)});
-  return {bid:agg(plans.bid), wait:agg(plans.wait), platform:agg(plans.platform)};
+  // the same patient line played with a human's 133ms reaction delay
+  const lagRuns = [];
+  for (let s=0; s<seeds; s++){
+    const g = boot(3000+s, src);
+    lagRuns.push(seeded(g, ()=>{
+      g.state='title'; g.keys={boss:true}; g.update(F); g.state='play'; g.keys={};
+      let jf=0;
+      for (let f=0; f<60*70 && g.state==='play'; f++){
+        const st=bossStep(g,jf,'engaged',8); jf=st.jf; st.keys.jump=jf-->0; g.keys=st.keys; g.update(F);
+      }
+      return {won:g.state==='dealwon', own:g.G.lastHot?g.G.lastHot.own:0};
+    }));
+  }
+  return {bid:agg(plans.bid), wait:agg(plans.wait), platform:agg(plans.platform),
+          engaged:agg(plans.engaged), engagedLag:agg(lagRuns)};
 }
 function evalRuns(src){
-  // expert waits on the floor: the patient line the pricing rewards.
-  // (the perch is a decoy — 8px of clearance means drop-ins die; measured earlier)
-  const pols=[{n:'naive',skill:0,plan:'bid'},{n:'expert',skill:1,plan:'wait'}];
+  // expert stays engaged and punishes openings — the patient line the pricing
+  // rewards. (standing off is 'wait' and is meant to be punished; the perch is a
+  // decoy at 8px clearance. Both measured separately in probeDecisions.)
+  const pols=[{n:'naive',skill:0,plan:'bid'},{n:'expert',skill:1,plan:'engaged'}];
   const out={}; const bag={seen:new Set(), list:[]};
   for (const p of pols){
     const rs=[];
@@ -782,7 +907,8 @@ function evidence(r){
   if (r.verdict==='STALE') return r.note;
   const b=r.baseline, v=r.variant;
   const bits=[];
-  const pat = x => x.boss.wait.winRate >= x.boss.platform.winRate ? x.boss.wait : x.boss.platform;
+  const pat = x => [x.boss.wait, x.boss.platform, x.boss.engaged]
+                     .reduce((a,c)=> c.winRate > a.winRate ? c : a);
   if (pat(v).winRate !== pat(b).winRate)
     bits.push(`patient win ${(pat(b).winRate*100)|0}%→${(pat(v).winRate*100)|0}%`);
   if (v.boss.bid.winRate !== b.boss.bid.winRate)

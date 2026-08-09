@@ -74,7 +74,11 @@ const LP_NAGS = [
 const HOT_ENTRY  = 60;    // $60M post if you never bid
 const BID_STEP   = 45;    // what one satisfying stomp costs you
 const HOT_TARGET = 380;   // mark multiplier = HOT_TARGET / post-money
-const DEAL_SECS  = 60;    // "48 hours to sign" — long enough to wait him out
+const DEAL_SECS  = 16;    // a rival is closing this round while you dance
+const BID_TIME   = 4;     // what a bid actually buys: seconds. money -> time.
+const RESERVE_PUSH_COST = 8;   // dry powder spendable in the room...
+const RESERVE_PUSH_SECS = 3;   // ...to hold the rival off. reserves' second sink.
+const RIVALS = ['APEX PARTNERS','MERIDIAN','NORTHGATE','LATTICE','KESTREL CAPITAL'];
 const HOT_DEALS = [
   {name:'GROUNDTRUTH', pitch:'foundation models for HVAC'},
   {name:'PARABOLA',    pitch:'the Stripe for nuclear'},
@@ -237,7 +241,8 @@ function spawnBoss() {
   G.company = null;
   const d = HOT_DEALS[G.hotIdx++ % HOT_DEALS.length];
   G.deal = { name:d.name, pitch:d.pitch, val:HOT_ENTRY, bids:0, free:0,
-             t:DEAL_SECS, passT:0, hp:3 };
+             t:DEAL_SECS, t0:DEAL_SECS, passT:0, hp:3,
+             rival: RIVALS[G.hotIdx % RIVALS.length] };
   P.x = TILE * 4; P.y = TILE * 10; P.vx = 0; P.vy = 0; P.dir = 1;
   P.scale = 1; P.onGround = true; P.holdT = 0; P.dead = false;
   cam.x = 0;
@@ -384,7 +389,9 @@ function update(dt) {
   let ax = 0;
   if (keys.left)  { ax -= 1; P.dir = -1; }
   if (keys.right) { ax += 1; P.dir = 1; }
-  P.vx = ax * RUN;
+  // ground momentum: accelerate into a run, skid out of it
+  { const tgt = ax * RUN, rate = (ax === 0 ? 5200 : 3000) * dt;
+    P.vx += Math.max(-rate, Math.min(rate, tgt - P.vx)); }
 
   // conviction jump: tap = small check, hold = big check, harder landing
   P.coyoteT = P.onGround ? 0.09 : Math.max(0, (P.coyoteT||0) - dt);
@@ -543,7 +550,9 @@ function moveAndCollide(dt) {
           break;
         }
         // conviction landing: big holds land hard
-        if (P.holdT > HOLD_MAX*0.8 && P.vy > 700) G.shake = 0.25;
+        // every real fall punctuates, scaled to how hard you came down
+        if (P.vy > 430) { G.shake = Math.max(G.shake, Math.min(0.22, P.vy/4200));
+                          burst(P.x, P.y, 4, '#584d78', 90); }
         P.y = ty*TILE; P.vy = 0; P.onGround = true; break;
       }
     } else if (P.vy < 0) {
@@ -566,10 +575,28 @@ function updateBoss(dt) {
   const D = G.deal;
   if (ents.length > 40) ents = ents.filter(e => !e.gone);
 
-  D.t -= dt;
-  if (D.t <= 0) return loseDeal('The round closed. Nobody called you.');
+  // Standing off is not a strategy: the founder reads distance as disinterest and
+  // the rival closes faster. Patience has to be played IN the room, not across it —
+  // which is what makes waiting for the opening a skill instead of a wait.
+  const bossRef = ents.find(e => e.t === 'boss');
+  D.dis = !!(bossRef && !bossRef.defeated && Math.abs(P.x - bossRef.x) > 300);
+  D.t -= dt * (D.dis ? 2.6 : 1);
+  if (D.t <= 0) return loseDeal(D.rival + ' signed it while you were negotiating.');
 
   const pb = playerBox();
+
+  // reserves get a second use: burn dry powder to slow the rival instead of
+  // spending it on follow-ons later. Now "hold or deploy" weighs two real things.
+  if (keys.sec) {
+    keys.sec = false;
+    if (G.reserves >= RESERVE_PUSH_COST) {
+      G.reserves -= RESERVE_PUSH_COST; G.followOnSpent += RESERVE_PUSH_COST;
+      D.t += RESERVE_PUSH_SECS; D.t0 = Math.max(D.t0, D.t);
+      sfx.seat(); burst(P.x, P.y - 30, 12, '#9ecbff', 200);
+      toast('Burned $' + RESERVE_PUSH_COST + 'M of dry powder. ' + D.rival +
+            ' holds ' + RESERVE_PUSH_SECS + 's.', 2);
+    } else { sfx.denied(); toast('No dry powder left to burn.', 1.6); }
+  }
 
   // the door: you can just walk out. it costs you nothing today.
   const door = ents.find(e => e.t === 'door');
@@ -603,7 +630,8 @@ function updateBoss(dt) {
     } else if (b.mode === 'telegraph') {             // the tell: read it, pick your answer
       if ((b.timer -= dt) <= 0) {
         b.mode = b.next;
-        if (b.mode === 'dash')   { b.vx = b.face * 560 * sp; b.timer = 0.62; }
+        // readable late: a human reading the tell at 133ms still has an out
+        if (b.mode === 'dash')   { b.vx = b.face * 430 * sp; b.timer = 0.78; }
         if (b.mode === 'volley') { b.shots = b.hp <= 1 ? 5 : 3; b.shotT = 0; }
         if (b.mode === 'pound')  { b.vy = -700; b.tx = P.x; }
       }
@@ -695,10 +723,13 @@ function hitBoss(b) {
     ents.push({t:'float', x: b.x + 58, y: b.y - 104, txt: 'FREE', life: 1.1, col:'#59d68f'});
     toast('HE BLINKED. No markup.', 1.6);
   } else {
-    D.bids++; D.val += BID_STEP;
+    // paying up buys you time: the founder holds the process open for a bidder
+    D.bids++; D.val += BID_STEP; D.t += BID_TIME; D.t0 = Math.max(D.t0, D.t);
     sfx.markup();
     ents.push({t:'float', x: b.x + 58, y: b.y - 104, txt: '+' + fmtM(BID_STEP), life: 1.1});
-    toast(BID_BARKS[(D.bids-1) % BID_BARKS.length] + '  Post-money ' + fmtM(D.val) + '.', 1.6);
+    ents.push({t:'float', x: b.x + 58, y: b.y - 132, txt: '+' + BID_TIME + 's', life: 1.1, col:'#9ecbff'});
+    toast(BID_BARKS[(D.bids-1) % BID_BARKS.length] + '  ' + fmtM(D.val) +
+          ' — and ' + D.rival + ' has to wait.', 1.8);
   }
 
   if (b.hp <= 0) {
@@ -875,7 +906,7 @@ function drawBossIntro() {
   ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 21px monospace';
   ctx.fillText(G.deal.name + ' — ' + G.deal.pitch, W/2, H/2 - 34);
   ctx.fillStyle = '#b8b4cc'; ctx.font = '15px monospace';
-  ctx.fillText('Everyone is in it. 48 hours to sign.', W/2, H/2 + 2);
+  ctx.fillText(G.deal.rival + ' is closing it. You have ' + DEAL_SECS + ' seconds.', W/2, H/2 + 2);
   ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 17px monospace';
   ctx.fillText('TIER 1 VC is standing in front of the signature.', W/2, H/2 + 38);
   ctx.fillStyle = '#6a677f'; ctx.font = '13px monospace';
@@ -1221,8 +1252,9 @@ function drawHUD() {
   ctx.fillRect(W-220, 48, 200 * (G.clock/(G.years*SECS_PER_YEAR)), 8);
   ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
   if (G.mode === 'boss') {
-    ctx.fillStyle = G.deal.t < 12 ? '#ff6b81' : '#6a677f';
-    ctx.fillText('48 HOURS TO SIGN: ' + Math.ceil(G.deal.t), W-20, 72);
+    ctx.fillStyle = G.reserves >= RESERVE_PUSH_COST ? '#9ecbff' : '#3d3a52';
+    ctx.fillText('[X] burn $' + RESERVE_PUSH_COST + 'M dry powder → hold them ' +
+                 RESERVE_PUSH_SECS + 's', W-20, 72);
     ctx.fillStyle = '#6a677f';
     ctx.fillText('stand still in the door to pass', W-20, 90);
   } else {
@@ -1245,6 +1277,18 @@ function drawHUD() {
     ctx.fillText('POST-MONEY ' + fmtM(D.val), W/2, 146);
     ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
     ctx.fillText('your $10M buys ' + (CHECK/D.val*100).toFixed(1) + '%', W/2, 162);
+
+    // the rival closing the round: the thing your money actually buys off
+    const rf = Math.max(0, Math.min(1, D.t / D.t0));
+    const urgent = D.t < 7;
+    ctx.font = 'bold 11px monospace';
+    ctx.fillStyle = D.dis ? '#ff6b81' : urgent ? '#ff6b81' : '#b8b4cc';
+    ctx.fillText(D.rival + ' IS CLOSING THIS ROUND — ' + Math.ceil(D.t) + 's' +
+                 (D.dis ? '   ⚠ YOU LOOK DISINTERESTED (2.6x)' : ''), W/2, 186);
+    ctx.fillStyle = '#2b2840'; ctx.fillRect(W/2-170, 192, 340, 9);
+    ctx.fillStyle = (urgent || D.dis) ? '#ff6b81' : '#9ecbff';
+    ctx.fillRect(W/2-170, 192, 340*rf, 9);
+    ctx.strokeStyle = '#584d78'; ctx.lineWidth = 1; ctx.strokeRect(W/2-170, 192, 340, 9);
     // his conviction: three hits and he walks
     const bs = ents.find(e => e.t === 'boss');
     const hp = bs ? Math.max(0, bs.hp) : 0;
