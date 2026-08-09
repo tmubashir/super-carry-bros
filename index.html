@@ -42,6 +42,13 @@ const ROUND_SIZE = 7;         // term sheets per round before a markup round clo
 const DILUTE = 0.85;          // sprite scale per round
 const FOLLOWON_COST = [0, 2, 4, 7, 11, 16]; // reserves per coin, by round
 
+// ---- the daily fund: one seeded run, same for everyone, share the carnage ----
+function mulberry32(a){a|=0;return function(){a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+let RNG = Math.random;                       // gameplay flavour; seeded in daily mode
+const DAILY_NUM = Math.floor(Date.now()/864e5) - 20672;   // issue number
+const SITE_URL = 'tmubashir.github.io/super-carry-bros';
+
 const PASS_LINES = [
   '"We\'re going to pass, but let\'s keep in touch."',
   '"Too early for us."',
@@ -106,19 +113,22 @@ const sfx = {
 // Legend: # ground  = platform  b brick  t termsheet  s SAFE  U uncapped SAFE
 //         B board seat  P pro rata  M 2&20 mushroom  g goomba  F flag  C conveyor(founders)
 //         ^ spike pit marker (visual)
+// 1-1 Demo Day, rebuilt: bounce pads (J) open sky routes, a moving platform (m)
+// spans the double pit, Serial Pivots (p) keep the ground honest, and the coins
+// trace the jump arcs they expect you to fly.
 const LEVEL_ROWS = [
-"................................................................................................................................................................",
-"................................................................................................................................................................",
-"..........................................................U....................................................................................................",
-"................................................................................................................................................................",
-"...................t.t.t..............................=====..........s...................B..............t..t..t.........................U.......................",
-"..............................................................................========..===..........=========..............s.s.s.....===......................",
-"..........................................t.s.t..............................................................................=====.............................",
-".......................................======.......M...............t.t..........................P...............g.....................................F.......",
-"..................................................====..........==========...............g..........====.......=====...........g.......................F.......",
-"......CCCCCCCCCC.......g......s.s.s.......t.t.t.........s.s.s.................t..t............====..........................========...................F.......",
-"##########################..####################...####################################..####################################################...################",
-"##########################..####################...####################################..####################################################...################",
+"........................................................................................................................................................................",
+"........................................................................................................................................................................",
+"..............................................U........................................................U................................................................",
+".............................................t..t.......t..t.........................................======.............................................................",
+"............................................======.....======...t...............................s.s............B..................P.....................................",
+"...........................s.s.................................===...t.........................=====..........===...............=====.........t.t.......................",
+"..........................=====.....................................===...t...............................................M..................===........................",
+".....................t.t..............................m..................===...t............................====........=====.............t.............F...............",
+"....................====......................................................===........................................................===............................",
+"......CCCCCCCCCC..s.s.........t.t.tg..J.....s.s.s............t.t..........g..p......s....J.............g..p.....t.t.........s.s......g............t.t.t.................",
+"#########################..#############...######....###...################################...######################...#################################################",
+"#########################..#############...######....###...################################...######################...#################################################",
 ];
 // The Tier 1 VC arena. Two routes to the HOT DEAL: the ground (through him)
 // or the platforms (around him). Only one of them is cheap.
@@ -145,7 +155,7 @@ function setMap(rows) { MAP = rows; MAP_W = rows[0].length; MAP_H = rows.length;
 // '=' platforms are one-way: they catch you on the way down and are not there
 // on the way up, so you never bonk a shoulder on the invisible half of a tile.
 const solidFull = ch => ch === '#' || ch === 'b' || ch === 'C' || (ch === 'G' && !gateOpen);
-const solidTop  = ch => solidFull(ch) || ch === '=';
+const solidTop  = ch => solidFull(ch) || ch === '=' || ch === 'J';
 function tileAt(tx, ty) {
   if (tx < 0 || tx >= MAP_W) return '#';
   if (ty < 0 || ty >= MAP_H) return '.';
@@ -158,25 +168,31 @@ let keys = {};
 let stateTimer = 0;
 let G;           // run state
 
-function newRun() {
+function newRun(runMode) {
+  const daily = runMode === 'daily';
+  RNG = daily ? mulberry32(DAILY_NUM * 2654435761) : Math.random;
   G = {
-    companies: 10,          // remaining, incl. current
+    daily,
+    years: daily ? 4 : FUND_YEARS,   // the daily is a 4-year micro-fund: ~90s
+    companies: daily ? 4 : 10,       // remaining, incl. current
     companyIdx: 1,          // which company we're on (1-based, for flavor)
     exits: [],              // realized exit values ($M)
     deadPaper: 0,           // paper value written to zero (for flavor)
-    reserves: START_RESERVES,
+    reserves: daily ? 25 : START_RESERVES,
     followOnSpent: 0,
-    clock: FUND_YEARS * SECS_PER_YEAR,
+    clock: (daily ? 4 : FUND_YEARS) * SECS_PER_YEAR,
     toast: null, toastT: 0,
     nagIdx: 0, nextNag: SECS_PER_YEAR * 1.5,
     shake: 0,
     mode: 'level',
     resolved: 0,            // companies that have exited or died
-    bossQueue: [1, 5],      // a hot deal crosses your desk after 1 and 5 of them
+    bossQueue: daily ? [1, 2] : [1, 5],  // hot deals cross the desk early and often
     antiPortfolio: [],      // the ones you didn't get
     pendingHot: null,       // hot deal won, waiting to be played
     hotIdx: 0,
     deal: null,
+    story: [],              // one glyph per outcome — this becomes the share card
+    copied: false,
   };
   spawnCompany();
   state = 'play';
@@ -242,6 +258,29 @@ const P = { x:0, y:0, vx:0, vy:0, w:26, h:34, scale:1, dir:1, onGround:false,
             holdT:0, jumpHeld:false, dead:false };
 const cam = { x:0 };
 
+// juice: particles + hit-stop. cosmetic only — never touches game state.
+let fx = [], freeze = 0;
+function burst(x, y, n, col, spd) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, v = (0.3 + Math.random() * 0.7) * spd;
+    fx.push({x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - spd * 0.5,
+             life: 0.4 + Math.random() * 0.45, col, sz: 2 + (Math.random() * 3 | 0)});
+  }
+  if (fx.length > 400) fx.splice(0, fx.length - 400);
+}
+function stepFx(dt) {
+  for (const p of fx) { p.vy += 1400 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+  fx = fx.filter(p => p.life > 0);
+}
+function drawFx() {
+  for (const p of fx) {
+    ctx.globalAlpha = Math.min(1, p.life * 2.5);
+    ctx.fillStyle = p.col;
+    ctx.fillRect(p.x - p.sz / 2, p.y - p.sz / 2, p.sz, p.sz);
+  }
+  ctx.globalAlpha = 1;
+}
+
 // entities (coins, enemies, founders, flag)
 let ents = [];
 function spawnEntities() {
@@ -257,10 +296,16 @@ function spawnEntities() {
     if (ch === 'g') ents.push({t:'goomba', x, y: ty*TILE + TILE - 13,
                                vx:-(60 + (typeof G!=='undefined' && G ? (G.resolved||0)*16 : 0)),
                                w:26, h:26, dead:0});
+    if (ch === 'p') ents.push({t:'pivot', x, spawnX:x, y: ty*TILE + TILE - 13,
+                               groundY: ty*TILE + TILE - 13,
+                               vx:0, vy:0, hopT: 0.8, form: 0, w:26, h:26, dead:0});
+    if (ch === 'm') ents.push({t:'mover', x, y: ty*TILE + 10, x0: x - TILE*3.5, x1: x + TILE*3.5,
+                               dir:1, spd:85, w:TILE*2.6});
     if (ch === 'F' && ty === 7) ents.push({t:'flag', x: tx*TILE + TILE/2, y: ty*TILE});
     if (ch === 'X') ents.push({t:'boss', x, y:(ty+1)*TILE, groundY:(ty+1)*TILE,
-                               face:-1, vx:0, vy:0, stun:0, mode:'walk',
-                               timer:1.6, atk:0, next:'pound', hp:3, defeated:0});
+                               face:-1, vx:0, vy:0, stun:0, mode:'idle',
+                               timer:1.4, next:'pound', shots:0, shotT:0, tx:x,
+                               shoveT:0, hp:3, defeated:0});
     if (ch === 'H') ents.push({t:'hotdeal', x, y:(ty+1)*TILE});
     if (ch === 'D') ents.push({t:'door', x, y:(ty+1)*TILE});
   }
@@ -268,7 +313,7 @@ function spawnEntities() {
   if (MAP.some(r => r.indexOf('C') >= 0))
     for (let i = 0; i < 5; i++)
       ents.push({t:'founder', x: TILE*(6.5 + i*2), baseX: TILE*(6.5+i*2), y: TILE*9.5-14,
-                 pitch: (Math.random()*FOUNDER_PITCHES.length)|0, pt: i*0.8});
+                 pitch: (RNG()*FOUNDER_PITCHES.length)|0, pt: i*0.8});
 }
 
 // ---------------------------------------------------------------- helpers
@@ -286,7 +331,8 @@ function playerBox() {
 let last = 0;
 function frame(ts) {
   const dt = Math.min((ts - last)/1000, 0.033); last = ts;
-  update(dt); render(dt);
+  if (freeze > 0) { freeze--; render(dt); requestAnimationFrame(frame); return; }  // hit-stop
+  update(dt); stepFx(dt); render(dt);
   requestAnimationFrame(frame);
 }
 
@@ -297,10 +343,15 @@ function update(dt) {
       keys.boss = false; keys.action = false;
       newRun(); G.resolved = 1; nextScene(); return;
     }
-    if (keys.action) { keys.action = false; state='play'; newRun(); }
+    if (keys.daily) { keys.daily = false; keys.action = false; newRun('daily'); return; }
+    if (keys.action) { keys.action = false; newRun(); }
     return;
   }
-  if (state === 'gameover') { if (keys.action && stateTimer > 1.2) { keys.action=false; state='title'; } return; }
+  if (state === 'gameover') {
+    if (keys.copy) { keys.copy = false; copyShare(); }
+    if (keys.action && stateTimer > 1.2) { keys.action=false; state='title'; }
+    return;
+  }
   if (state === 'bossintro') {
     if (stateTimer > 3.6 || (keys.action && stateTimer > 0.6)) { keys.action=false; state='play'; }
     return;
@@ -320,7 +371,7 @@ function update(dt) {
   G.nextNag -= dt;
   if (G.nextNag <= 0) {
     toast('📩 ' + LP_NAGS[G.nagIdx++ % LP_NAGS.length], 2.6);
-    G.nextNag = SECS_PER_YEAR * (1.5 - Math.min(1, (1 - G.clock/(FUND_YEARS*SECS_PER_YEAR))) * 1.1);
+    G.nextNag = SECS_PER_YEAR * (1.5 - Math.min(1, (1 - G.clock/(G.years*SECS_PER_YEAR))) * 1.1);
   }
   if (G.clock <= 0) { G.clock = 0; toast('FUND TERM EXPIRED', 2); endRun(); return; }
 
@@ -357,6 +408,11 @@ function update(dt) {
     const b = playerBox();
     const tx = Math.floor((b.x+b.w/2)/TILE), ty = Math.floor((b.y+b.h+2)/TILE);
     if (P.onGround && tileAt(tx,ty) === 'C') P.x += 55*dt;
+    // running over a bounce pad launches you — it's a boost strip, not decor
+    if (P.onGround && tileAt(tx, Math.floor((b.y+b.h-2)/TILE)) === 'J') {
+      P.vy = -1120; P.onGround = false; P.holdT = HOLD_MAX; P.jumpHeld = false;
+      burst(P.x, P.y, 10, '#9ecbff', 200); sfx.jump(); blip(700,.12,'square',.05,1200);
+    }
   }
 
   // fell off the map
@@ -372,6 +428,7 @@ function update(dt) {
     keys.sec = false;
     const v = C.paper * 0.5;
     G.exits.push(v);
+    G.story.push({t:'sec'});
     toast('SECONDARY: sold at 50% of the mark. ' + fmtM(v) + ' DPI. Coward.', 3);
     sfx.markup();
     retireCompany('exit');
@@ -395,6 +452,8 @@ function update(dt) {
       if (rectHit(b.x,b.y,b.w,b.h, e.x-e.w/2, e.y-e.h/2, e.w, e.h)) {
         if (P.vy > 150 && b.y + b.h < e.y + 4) { // stomp
           e.dead = 1; P.vy = -430; sfx.stomp();
+          freeze = 4; G.shake = Math.max(G.shake, 0.15);        // impact you can feel
+          burst(e.x, e.y, 12, '#ff8da5', 220);
           C.paper += 1; toast('Restructured the round. +$1M mark.', 1.6);
         } else if (C.fees > 0) {
           e.dead = 1; sfx.stomp(); // fees make you invincible to consequences
@@ -402,6 +461,43 @@ function update(dt) {
       }
     } else if (e.t === 'goomba' && e.dead) {
       e.dead += dt;
+    } else if (e.t === 'pivot' && !e.dead) {
+      // Serial Pivot: hops at you, changes what it claims to be mid-air
+      if (e.y >= e.groundY) {
+        e.y = e.groundY; e.vy = 0; e.vx = 0;
+        if ((e.hopT -= dt) <= 0) {
+          e.hopT = 1.1; e.form = (e.form + 1) % 4;
+          // territorial: lunges at you near its patch, hops home if it strayed
+          const home = Math.abs(e.x - e.spawnX) > TILE*2.5;
+          e.vy = -520;
+          e.vx = (home ? (e.spawnX > e.x ? 1 : -1) : (P.x > e.x ? 1 : -1)) * 135;
+        }
+      } else { e.vy += GRAV * 0.8 * dt; }
+      e.x += e.vx * dt; e.y += e.vy * dt;
+      if (e.y > e.groundY) e.y = e.groundY;
+      const b2 = playerBox();
+      if (rectHit(b2.x,b2.y,b2.w,b2.h, e.x-e.w/2, e.y-e.h/2, e.w, e.h)) {
+        if (P.vy > 150 && b2.y + b2.h < e.y + 4) {
+          e.dead = 1; P.vy = -430; sfx.stomp();
+          freeze = 4; G.shake = Math.max(G.shake, 0.15);
+          burst(e.x, e.y, 12, '#c9a2ff', 220);
+          C.paper += 2; toast('Acqui-hired the pivot. +$2M mark.', 1.6);
+        } else if (C.fees > 0) { e.dead = 1; sfx.stomp(); }
+        else return killCompany('pivoted into you');
+      }
+    } else if (e.t === 'pivot' && e.dead) {
+      e.dead += dt;
+    } else if (e.t === 'mover') {
+      e.x += e.dir * e.spd * dt;
+      if (e.x > e.x1) { e.x = e.x1; e.dir = -1; }
+      if (e.x < e.x0) { e.x = e.x0; e.dir = 1; }
+      // catch and carry the player
+      const b3 = playerBox(), feet = b3.y + b3.h;
+      if (P.vy >= 0 && feet >= e.y - 8 && feet <= e.y + 14 &&
+          b3.x + b3.w > e.x - e.w/2 && b3.x < e.x + e.w/2) {
+        P.y = e.y; P.vy = 0; P.onGround = true;
+        P.x += e.dir * e.spd * dt;
+      }
     } else if (e.t === 'founder') {
       e.pt += dt;
       e.x = e.baseX + Math.sin(e.pt*0.9)*6;
@@ -440,6 +536,12 @@ function moveAndCollide(dt) {
         const ch = tileAt(tx,ty);
         if (!solidTop(ch)) continue;
         if (ch === '=' && prevFeet > ty*TILE + 2) continue;   // one-way: came from below
+        if (ch === 'J') {                                     // bounce pad: term-sheet trampoline
+          P.y = ty*TILE; P.vy = -1120; P.onGround = false;
+          P.holdT = HOLD_MAX; P.jumpHeld = false;
+          burst(P.x, P.y, 10, '#9ecbff', 200); sfx.jump(); blip(700,.12,'square',.05,1200);
+          break;
+        }
         // conviction landing: big holds land hard
         if (P.holdT > HOLD_MAX*0.8 && P.vy > 700) G.shake = 0.25;
         P.y = ty*TILE; P.vy = 0; P.onGround = true; break;
@@ -476,45 +578,82 @@ function updateBoss(dt) {
     if (D.passT >= 1.2) return loseDeal('You walked out of the room.', true);
   } else D.passT = Math.max(0, D.passT - dt*2);
 
+  // TIER 1 VC, rebuilt as a real fight: every attack telegraphs, contact while
+  // he strolls is a shove (not a death), and the skill is baiting the dash —
+  // he wall-slams into a long free-hit window. Phases escalate as hp drops.
   const b = ents.find(e => e.t === 'boss');
   if (b && b.defeated) {
-    b.defeated += dt;                                // he concedes and walks
+    b.defeated += dt;                                // takes a call, walks off
     b.x += b.face * -90 * dt;
   } else if (b) {
-    b.face = P.x < b.x ? -1 : 1;
+    const sp = 1 + (3 - b.hp) * 0.18;                // phase speed-up
+    if (b.shoveT > 0) b.shoveT -= dt;
     if (b.stun > 0) {
       b.stun -= dt; b.x += b.vx * dt; b.vx *= 0.90;
-    } else if (b.mode === 'walk') {
-      b.x += b.face * 62 * dt;
-      if ((b.timer -= dt) <= 0) { b.mode = 'wind'; b.timer = 0.45;
-                                  b.next = (b.atk++ % 2) ? 'throw' : 'pound'; }
-    } else if (b.mode === 'wind') {
+      if (b.y < b.groundY) { b.vy += GRAV*dt; b.y = Math.min(b.groundY, b.y + b.vy*dt); }
+    } else if (b.mode === 'idle') {
+      b.face = P.x < b.x ? -1 : 1;
+      b.x += b.face * 70 * sp * dt;
       if ((b.timer -= dt) <= 0) {
-        if (b.next === 'throw') {                    // pre-empt
-          const dx = P.x - b.x;
-          ents.push({t:'proj', x: b.x + b.face*34, y: b.y - 64,
-                     vx: Math.max(-430, Math.min(430, dx*1.6)), vy: -270});
-          blip(520,.1,'square',.05,240);
-          b.mode = 'walk'; b.timer = 1.5;
-        } else { b.mode = 'pound'; b.vy = -640; }
+        const d = Math.abs(P.x - b.x);
+        b.next = d > 380 ? 'volley' : d > 130 ? 'dash' : 'pound';
+        b.mode = 'telegraph'; b.timer = 0.5 / sp;
+        blip(300,.15,'square',.05);
       }
+    } else if (b.mode === 'telegraph') {             // the tell: read it, pick your answer
+      if ((b.timer -= dt) <= 0) {
+        b.mode = b.next;
+        if (b.mode === 'dash')   { b.vx = b.face * 560 * sp; b.timer = 0.62; }
+        if (b.mode === 'volley') { b.shots = b.hp <= 1 ? 5 : 3; b.shotT = 0; }
+        if (b.mode === 'pound')  { b.vy = -700; b.tx = P.x; }
+      }
+    } else if (b.mode === 'dash') {                  // "we're pre-empting"
+      b.x += b.vx * dt; b.timer -= dt;
+      const atWall = b.x <= TILE*2.6 || b.x >= TILE*26.9;
+      if (atWall) {                                  // baited into the wall: long opening
+        b.mode = 'winded'; b.timer = 2.8; b.vx = 0;
+        G.shake = 0.32; freeze = 5; blip(80,.3,'sawtooth',.08);
+        burst(b.x, b.y - 60, 26, '#cfcbdd', 300);    // term sheets everywhere
+      } else if (b.timer <= 0) {
+        b.mode = 'winded'; b.timer = 1.1; b.vx = 0;  // even a whiff leaves a short opening
+      }
+    } else if (b.mode === 'volley') {                // "our platform team will call you"
+      b.shotT -= dt;
+      if (b.shotT <= 0 && b.shots > 0) {
+        b.shots--; b.shotT = 0.22;
+        const dx = P.x - b.x;
+        ents.push({t:'proj', x: b.x + b.face*30, y: b.y - 70,
+                   vx: Math.max(-460, Math.min(460, dx*(1.1 + 0.3*(b.shots%3)))),
+                   vy: -330 - 70*(b.shots%2)});
+        blip(520,.08,'square',.05,240);
+      }
+      if (b.shots <= 0 && b.shotT <= 0) { b.mode = 'idle'; b.timer = 1.4 / sp; }
     } else if (b.mode === 'pound') {                 // "we'll lead"
-      b.vy += GRAV*0.85*dt; b.y += b.vy*dt;
+      b.vy += GRAV*0.9*dt; b.y += b.vy*dt;
+      b.x += (b.tx - b.x) * dt * 1.2;                // drifts toward where you were
       if (b.y >= b.groundY) {
         b.y = b.groundY; b.vy = 0; b.mode = 'winded'; b.timer = 2.2;
-        G.shake = 0.3; blip(90,.25,'sawtooth',.07);
-        ents.push({t:'wave', x:b.x, y:b.groundY, vx: 300});
-        ents.push({t:'wave', x:b.x, y:b.groundY, vx:-300});
+        G.shake = 0.3; freeze = 4; blip(90,.25,'sawtooth',.07);
+        const wv = b.hp <= 2 ? 340 : 300;
+        ents.push({t:'wave', x:b.x, y:b.groundY, vx: wv});
+        ents.push({t:'wave', x:b.x, y:b.groundY, vx:-wv});
       }
-    } else if (b.mode === 'winded') {                // the opening. hit him here.
-      if ((b.timer -= dt) <= 0) { b.mode = 'walk'; b.timer = 1.5; }
+    } else if (b.mode === 'winded') {                // the opening. hit him here. it's free.
+      if ((b.timer -= dt) <= 0) { b.mode = 'idle'; b.timer = 1.2 / sp; }
     }
     b.x = Math.max(TILE*2.5, Math.min(TILE*27, b.x));
 
     const BW = 66, BH = 100, bx = b.x - BW/2, by = b.y - BH;
     if (rectHit(pb.x,pb.y,pb.w,pb.h, bx,by,BW,BH)) {
       if (P.vy > 120 && pb.y + pb.h < by + 34) hitBoss(b);
-      else if (b.stun <= 0 && b.mode !== 'winded') return loseDeal('He ran you over. Politely.');
+      else if (b.mode === 'dash' && b.stun <= 0)
+        return loseDeal('Run over mid-pre-empt.');
+      else if (b.stun <= 0 && b.mode !== 'winded') {
+        // strolling contact is a shove, not a death — deaths come from attacks
+        P.x = b.x + (P.x < b.x ? -1 : 1) * (BW/2 + 22);
+        P.vy = -240; P.vx = 0;
+        if (b.shoveT <= 0) { b.shoveT = 2; toast('"Great to see you." He moves through you.', 1.5); }
+      }
     }
   }
 
@@ -545,8 +684,10 @@ function hitBoss(b) {
   const free = b.mode === 'winded';
   b.hp--; D.hp = b.hp;
   b.stun = 0.95; b.vx = (P.x < b.x ? 1 : -1) * 340;
-  b.mode = 'walk'; b.timer = 1.5;      // he recomposes — one free hit per opening
-  P.vy = -470; G.shake = 0.18;
+  b.mode = 'idle'; b.timer = 1.4;      // he recomposes — one free hit per opening
+  if (b.y < b.groundY) b.vy = 300;     // knocked out of a pound mid-air
+  P.vy = -470; G.shake = 0.18; freeze = 6;
+  burst(b.x, b.y - 60, 18, free ? '#59d68f' : '#ffd75e', 260);
 
   if (free) {
     D.free++;
@@ -580,8 +721,9 @@ function winHotDeal() {
 
 function loseDeal(reason, passed) {
   const D = G.deal;
+  G.story.push({t: passed ? 'pass' : 'lost'});
   G.antiPortfolio.push({ name: D.name, pitch: D.pitch, passed: !!passed,
-                         mark: 1400 + Math.random()*2600 });
+                         mark: 1400 + RNG()*2600 });
   G.lastDealReason = reason; G.lastDealPassed = !!passed;
   sfx.death();
   state = 'deallost'; stateTimer = 0;
@@ -618,6 +760,7 @@ function collect(e) {
   const mult = (C.proRata > 0 ? 2 : 1) * (1 + C.round * 0.6) * (C.mult || 1);
   C.paper += e.val * mult;
   C.roundCoins++;
+  burst(e.x, e.y, 6, '#ffd75e', 130);
   sfx.coin();
   if (C.roundCoins >= ROUND_SIZE && C.round < ROUND_NAMES.length-1) {
     C.round++; C.roundCoins = 0;
@@ -634,7 +777,8 @@ function killCompany(why) {
   const C = G.company;
   G.deadPaper += C.paper;
   G.companies--; G.resolved++;
-  G.lastPass = PASS_LINES[(Math.random()*PASS_LINES.length)|0];
+  G.story.push({t:'dead'});
+  G.lastPass = PASS_LINES[(RNG()*PASS_LINES.length)|0];
   G.lastWhy = why;
   sfx.death();
   state = 'dead'; stateTimer = 0;
@@ -643,6 +787,8 @@ function exitCompany() {
   const C = G.company;
   G.exits.push(C.paper);
   G.lastExit = C.paper;
+  G.story.push({t: C.hot ? 'hot' : 'exit', m: C.paper / CHECK});
+  burst(P.x, P.y - 30, 40, '#59d68f', 320); freeze = 5;
   sfx.exit();
   retireCompany('exit');
 }
@@ -651,6 +797,30 @@ function retireCompany(mode) {
   state = mode; stateTimer = 0;
 }
 function endRun() { state = 'gameover'; stateTimer = 0; }
+
+// ---- the share card: the run compressed into one pasteable block ----
+function storyEmoji() {
+  return G.story.map(s =>
+    s.t==='dead' ? '💀' : s.t==='sec' ? '🏃' : s.t==='pass' ? '🙅' : s.t==='lost' ? '😤'
+    : s.m >= 10 ? '🦄' : s.m >= 4 ? '🚀' : '📈').join('');
+}
+function shareText() {
+  const [q] = grade();
+  return 'SUPER CARRY BROS. ' + (G.daily ? '#' + DAILY_NUM : '(free play)') + '\n'
+    + (storyEmoji() || '📭') + '\n'
+    + 'DPI ' + dpiVal().toFixed(2) + 'x · ' + q + '\n'
+    + (G.exits.length ? 'best exit ' + fmtM(bestExit()) + ' ('
+        + (bestExit()/CHECK).toFixed(1) + 'x)\n' : '')
+    + SITE_URL;
+}
+function copyShare() {
+  const txt = shareText();
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard)
+      navigator.clipboard.writeText(txt);
+    G.copied = true;
+  } catch (e) { /* clipboard blocked; text is still on screen */ }
+}
 
 // grade: power law — only your best exit matters
 function grade() {
@@ -683,6 +853,7 @@ function render(dt) {
   ctx.translate(-Math.round(cam.x), 0);
   drawTiles();
   drawEnts();
+  drawFx();
   if (state !== 'dead') drawPlayer();
   ctx.restore();
 
@@ -775,6 +946,13 @@ function drawTiles() {
     } else if (ch === '=') {
       ctx.fillStyle = '#6b5a2e'; ctx.fillRect(x,y+4,TILE,14);
       ctx.fillStyle = '#9c8348'; ctx.fillRect(x,y+4,TILE,4);
+    } else if (ch === 'J') {
+      ctx.fillStyle = '#31436b'; ctx.fillRect(x+3, y+24, TILE-6, 12);      // base
+      ctx.strokeStyle = '#9ecbff'; ctx.lineWidth = 2;                     // coil
+      ctx.beginPath();
+      for (let i=0;i<4;i++){ ctx.moveTo(x+6, y+22-i*5); ctx.lineTo(x+TILE-6, y+19-i*5); }
+      ctx.stroke();
+      ctx.fillStyle = '#9ecbff'; ctx.fillRect(x+3, y+2, TILE-6, 4);       // pad
     } else if (ch === 'G' && !gateOpen) {
       ctx.fillStyle = '#2a2136'; ctx.fillRect(x,y,TILE,TILE);
       ctx.fillStyle = '#4a3a5e'; ctx.fillRect(x+3,y+3,TILE-6,TILE-6);
@@ -836,6 +1014,24 @@ function drawEnts() {
       ctx.fillStyle = '#2b1220';
       ctx.fillRect(-8,4,4,4); ctx.fillRect(4,4,4,4);
       ctx.restore();
+    } else if (e.t === 'pivot') {
+      if (e.dead && e.dead > 0.4) continue;
+      const FORMS = [['#c9a2ff','AI'],['#8fd8ff','B2B'],['#ffd75e','D2C'],['#ff9d76','WEB3']];
+      const [col, tag] = FORMS[e.form];
+      ctx.save(); ctx.translate(e.x, e.y);
+      if (e.dead) ctx.scale(1, 0.4);
+      ctx.fillStyle = col; ctx.fillRect(-13,-13,26,26);
+      ctx.fillStyle = '#1a1030'; ctx.font = 'bold 9px monospace'; ctx.textAlign='center';
+      ctx.fillText(tag, 0, 2);
+      ctx.fillStyle = '#2b1220'; ctx.fillRect(-8,5,4,4); ctx.fillRect(4,5,4,4);
+      ctx.restore();
+    } else if (e.t === 'mover') {
+      ctx.save(); ctx.translate(e.x, e.y);
+      ctx.fillStyle = '#9c8348'; ctx.fillRect(-e.w/2, 0, e.w, 12);
+      ctx.fillStyle = '#d4af37'; ctx.fillRect(-e.w/2, 0, e.w, 4);
+      ctx.fillStyle = '#6b5a2e'; ctx.font='bold 9px monospace'; ctx.textAlign='center';
+      ctx.fillText(e.dir>0?'▶ BRIDGE ROUND ▶':'◀ BRIDGE ROUND ◀', 0, 10);
+      ctx.restore();
     } else if (e.t === 'founder') {
       ctx.save(); ctx.translate(e.x, e.y);
       ctx.fillStyle = '#c9b089'; ctx.fillRect(-5,-24,10,9);          // head
@@ -851,15 +1047,25 @@ function drawEnts() {
       ctx.fillStyle = '#1a2340'; ctx.fillText(msg, 0, -35);
       ctx.restore();
     } else if (e.t === 'boss') {
-      if (e.defeated > 0.9) continue;
+      if (e.defeated > 1.6) continue;
       const hit = e.stun > 0 && Math.floor(performance.now()/70)%2 === 0;
       const open = e.mode === 'winded' && !e.defeated;
       ctx.save(); ctx.translate(e.x, e.y);
-      if (e.defeated) { ctx.globalAlpha = Math.max(0, 1 - e.defeated); ctx.scale(1, 0.94); }
+      if (e.defeated) { ctx.globalAlpha = Math.max(0, 1 - e.defeated/1.6); }
       if (open) {                                   // hunched — this is the opening
         ctx.scale(1, 0.86);
         ctx.strokeStyle = 'rgba(89,214,143,' + (0.5+0.5*Math.sin(performance.now()/120)).toFixed(2) + ')';
         ctx.lineWidth = 3; ctx.strokeRect(-36,-118,72,118);
+      }
+      if (e.mode === 'telegraph') {                 // the tell
+        ctx.fillStyle = Math.floor(performance.now()/80)%2 ? '#ffd75e' : '#ff6b81';
+        ctx.font = 'bold 26px monospace'; ctx.textAlign = 'center';
+        ctx.fillText('!', 0, -128);
+      }
+      if (e.mode === 'dash') {                      // motion streaks
+        ctx.strokeStyle = 'rgba(255,215,94,0.5)'; ctx.lineWidth = 3;
+        for (let i=1;i<=3;i++){ ctx.beginPath();
+          ctx.moveTo(-e.face*(30+i*22), -80+i*18); ctx.lineTo(-e.face*(64+i*22), -80+i*18); ctx.stroke(); }
       }
       ctx.save(); ctx.scale(e.face, 1);
       // the shell: a stack of everyone else's term sheets
@@ -883,9 +1089,10 @@ function drawEnts() {
       ctx.fillStyle = '#0d0f1a'; ctx.fillRect(-11,-103,22,5);                    // glasses
       ctx.restore();
       ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center';
-      if (e.defeated) { ctx.fillStyle = '#6a677f'; ctx.fillText('...', e.x, e.y - 126); }
-      else if (e.mode === 'winded') { ctx.fillStyle = '#59d68f'; ctx.fillText('WINDED', e.x, e.y - 126); }
-      else { ctx.fillStyle = '#d4af37'; ctx.fillText('TIER 1 VC', e.x, e.y - 126); }
+      if (e.defeated) { ctx.fillStyle = '#b8b4cc';
+        ctx.fillText('"Sorry — I have a board thing."', e.x, e.y - 126); }
+      else if (e.mode === 'winded') { ctx.fillStyle = '#59d68f'; ctx.fillText('WINDED — FREE HIT', e.x, e.y - 126); }
+      else { ctx.fillStyle = '#d4af37'; ctx.fillText('TIER 1 VC · conviction ' + '●'.repeat(Math.max(0,e.hp)), e.x, e.y - 126); }
     } else if (e.t === 'proj' && !e.gone) {
       ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(performance.now()/90);
       ctx.fillStyle = '#ffd75e'; ctx.fillRect(-8,-11,16,22);
@@ -1002,15 +1209,16 @@ function drawHUD() {
 
   // fund clock — top right, escalating dread
   const yrsLeft = G.clock / SECS_PER_YEAR;
-  const yr = FUND_YEARS - yrsLeft;
+  const yr = G.years - yrsLeft;
   ctx.textAlign = 'right';
   ctx.font = 'bold 18px monospace';
   ctx.fillStyle = yrsLeft < 2 ? '#ff6b81' : yrsLeft < 4 ? '#ffd75e' : '#b8b4cc';
-  ctx.fillText('FUND YEAR ' + Math.min(10, Math.floor(yr)+1) + '/10', W-20, 38);
+  ctx.fillText((G.daily ? 'DAILY #' + DAILY_NUM + ' · YR ' : 'FUND YEAR ') +
+    Math.min(G.years, Math.floor(yr)+1) + '/' + G.years, W-20, 38);
   // clock bar
   ctx.fillStyle = '#2b2840'; ctx.fillRect(W-220, 48, 200, 8);
   ctx.fillStyle = yrsLeft < 2 ? '#ff6b81' : '#59d68f';
-  ctx.fillRect(W-220, 48, 200 * (G.clock/(FUND_YEARS*SECS_PER_YEAR)), 8);
+  ctx.fillRect(W-220, 48, 200 * (G.clock/(G.years*SECS_PER_YEAR)), 8);
   ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
   if (G.mode === 'boss') {
     ctx.fillStyle = G.deal.t < 12 ? '#ff6b81' : '#6a677f';
@@ -1105,9 +1313,9 @@ function renderTitle() {
   lines.forEach((l,i)=>ctx.fillText(l, W/2, 260 + i*24));
   ctx.fillStyle = Math.sin(t*5)>0 ? '#ffd75e' : '#6a677f';
   ctx.font = 'bold 18px monospace';
-  ctx.fillText('PRESS SPACE TO DEPLOY CAPITAL', W/2, 448);
-  ctx.fillStyle = '#6a677f'; ctx.font = '13px monospace';
-  ctx.fillText('[B] skip straight to the hot deal', W/2, 478);
+  ctx.fillText('[ENTER] THE DAILY FUND #' + DAILY_NUM + ' — 4 companies, 2 min, same for everyone', W/2, 440);
+  ctx.fillStyle = '#b8b4cc'; ctx.font = '14px monospace';
+  ctx.fillText('[SPACE] full 10-year fund    ·    [B] straight to the hot deal', W/2, 470);
   ctx.restore();
 }
 
@@ -1146,9 +1354,16 @@ function renderGameOver() {
     ctx.fillText('ANTI-PORTFOLIO: ' + w.name + ' last marked at ' + fmtM(w.mark) + '.', W/2, 385);
   }
 
+  // the share card: the run as a pasteable artifact
+  ctx.font = '22px monospace';
+  ctx.fillText(storyEmoji() || '📭', W/2, 408);
+  ctx.font = 'bold 15px monospace';
+  ctx.fillStyle = G.copied ? '#59d68f' : '#9ecbff';
+  ctx.fillText(G.copied ? 'COPIED — go paste it somewhere loud' :
+    '[C] copy your fund card' + (G.daily ? ' for DAILY #' + DAILY_NUM : ''), W/2, 438);
   ctx.font = 'bold 16px monospace';
   ctx.fillStyle = Math.sin(performance.now()/200)>0 ? '#ffd75e' : '#6a677f';
-  ctx.fillText('PRESS SPACE TO RAISE ANOTHER FUND', W/2, 440);
+  ctx.fillText('PRESS SPACE TO RAISE ANOTHER FUND', W/2, 472);
   ctx.restore();
 }
 
@@ -1162,6 +1377,8 @@ addEventListener('keydown', e => {
   }
   if (e.code === 'KeyX') keys.sec = true;
   if (e.code === 'KeyB') keys.boss = true;
+  if (e.code === 'Enter') keys.daily = true;
+  if (e.code === 'KeyC') keys.copy = true;
 });
 addEventListener('keyup', e => {
   if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;

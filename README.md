@@ -11,8 +11,10 @@ companies. Nine of them are supposed to die.
 |---|---|
 | `←` `→` or `A` `D` | Move |
 | `Space` (hold it) | Conviction jump — bigger check, further to fall |
+| `Enter` | **The Daily Fund** — 4 companies, ~2 minutes, same seed for everyone today |
 | `X` | Secondary sale. 50% of the mark, guaranteed, run over. |
 | `B` | Skip straight to the hot deal |
+| `C` (end screen) | Copy your fund card — emoji portfolio, DPI, quartile — and go paste it somewhere loud |
 
 ## The rule that makes it not a platformer
 
@@ -29,8 +31,11 @@ He stands between you and the flag. Three hits and he walks, so you will always
 get to sign. The only question is what you paid for it.
 
 He has no health bar. He has a post-money, and it only goes up. Every hit you
-land is a bid — plus $45M, and your ownership falls with it. But he ground-pounds,
-and for two seconds afterward he is winded. Hit him *there* and it's free.
+land is a bid — plus $45M, and your ownership falls with it. But every attack
+telegraphs, every attack leaves him winded after, and if you bait his dash into
+a wall he is winded for a long time. Hit him *there* and it's free. Brushing
+past him while he strolls doesn't kill you — he just shoves you and says it's
+great to see you.
 
 - **Three free hits:** $60M entry, you own 16.7%, and this one can return the fund.
 - **Three impatient ones:** $195M entry, you own 3.5%, and you have bought a

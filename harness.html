@@ -136,12 +136,13 @@ function levelStep(g, jf, skill){
     if(!g.solidTop(g.tileAt(tx,ty)) && !g.solidTop(g.tileAt(tx,ty+1))){pit=d;break;}
   }
   const wall = g.solidFull(g.tileAt(Math.floor((b.x+b.w+20)/K.TILE), Math.floor((feet-8)/K.TILE)));
-  const gm = g.ents.find(e=>e.t==='goomba' && !e.dead && e.x>P.x && e.x-P.x<95 && Math.abs(e.y-feet)<60);
+  const gm = g.ents.find(e=>(e.t==='goomba'||e.t==='pivot') && !e.dead && e.x>P.x && e.x-P.x<95 && Math.abs(e.y-feet)<70);
   if (P.onGround && jf<=0 && (pit||wall||gm)) jf = pit?21 : gm?13 : 16;
-  // a skilled player also hops to grab high coins
+  // a skilled player also hops to grab high coins — but never over a pit
   if (skill>=2 && P.onGround && jf<=0){
     const coin = g.ents.find(e=>e.t==='coin'&&!e.taken&&e.x>P.x&&e.x-P.x<130&&feet-e.y>40&&feet-e.y<170);
-    if (coin) jf = 20;
+    const landSafe = coin && g.solidTop(g.tileAt(Math.floor(coin.x/K.TILE), Math.floor((feet+6)/K.TILE)));
+    if (coin && landSafe) jf = 20;
   }
   return {keys, jf};
 }
@@ -481,10 +482,12 @@ function probeLoop(){
 
 // ================================================================ L4 DEPTH
 function probeDepth(){
+  // three rungs: survive the level → also survive the boss cheaply.
+  // (a fancier coin-routing tier existed and measured its own bugs, not the game)
   const tiers = [
-    {name:'naive   (no coin routing, bids on sight)', skill:0, plan:'bid'},
-    {name:'competent (routes coins, waits sometimes)', skill:1, plan:'wait'},
-    {name:'expert  (routes coins, always waits)',      skill:2, plan:'wait'},
+    {name:'naive   (weak platforming, bids on sight)', skill:0, plan:'bid'},
+    {name:'competent (solid platforming, still bids)',  skill:1, plan:'bid'},
+    {name:'expert  (solid platforming, waits him out)', skill:1, plan:'wait'},
   ];
   const out = [];
   for (const t of tiers){
@@ -726,7 +729,7 @@ function evalBoss(src, seeds){
 function evalRuns(src){
   // expert waits on the floor: the patient line the pricing rewards.
   // (the perch is a decoy — 8px of clearance means drop-ins die; measured earlier)
-  const pols=[{n:'naive',skill:0,plan:'bid'},{n:'expert',skill:2,plan:'wait'}];
+  const pols=[{n:'naive',skill:0,plan:'bid'},{n:'expert',skill:1,plan:'wait'}];
   const out={}; const bag={seen:new Set(), list:[]};
   for (const p of pols){
     const rs=[];
