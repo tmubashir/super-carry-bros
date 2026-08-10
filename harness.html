@@ -471,7 +471,102 @@ function probeDecisions(){
     }
     return survived/N;
   });
-  add('L2', secOK>0.8?'WARN':'PASS','Secondary sale',
+  // Does buying the big number actually cost you? Three policies, identical motor
+  // skill, differing only in what they do with reserves.
+  const money = {};
+  for (const pol of ['never','always','hypeThenSell']){
+    const rs = [];
+    for (let s=0;s<5;s++){
+      const g2 = boot(1200+s);
+      rs.push(seeded(g2, ()=>{
+        g2.state='title'; g2.keys={action:true}; g2.update(F);
+        let jf=0, peak=0;
+        for (let f=0; f<60*300 && g2.state!=='gameover'; f++){
+          if (g2.state!=='play'){ g2.update(F); continue; }
+          const inB = g2.G.mode==='boss';
+          const st = inB ? bossStep(g2, jf, 'engaged') : levelStep(g2, jf, 1);
+          jf = st.jf; st.keys.jump = jf-- > 0;
+          const C = g2.G.company;
+          if (!inB && C){
+            // buy every markup you can afford
+            if (pol!=='never' && f%25===0) st.keys.raise = true;
+            // ...and dump it to a secondary once the mark is mostly air
+            if (pol==='hypeThenSell' && C.hype > (C.paper-C.hype)*1.5) st.keys.sec = true;
+          }
+          g2.keys = st.keys; g2.update(F);
+          peak = Math.max(peak, g2.tvpiVal());   // the number you WATCH, not the one you end on
+        }
+        return {dpi:g2.dpiVal(), peak, best:g2.bestExit(), grade:g2.grade()[0]};
+      }));
+    }
+    money[pol] = {dpi:+median(rs.map(r=>r.dpi)).toFixed(2),
+                  peakTvpi:+median(rs.map(r=>r.peak)).toFixed(2),
+                  best:+median(rs.map(r=>r.best)).toFixed(0),
+                  grades:[...new Set(rs.map(r=>r.grade))]};
+  }
+  // Controlled ladder: same company, same instant, differing only in markups bought.
+  // (The full-run policy sweep above confounds markup-buying with reserve starvation,
+  // so it cannot answer "is the number purchasable?" — only this can.)
+  const ladder = [];
+  for (let raises=0; raises<=3; raises++){
+    const g4 = boot(1700+raises);
+    ladder.push(seeded(g4, ()=>{
+      g4.state='title'; g4.keys={action:true}; g4.update(F);
+      const C = g4.G.company;
+      for (let i=0;i<raises;i++){ g4.keys={raise:true}; g4.update(F); }
+      const real = C.paper - C.hype;
+      return {raises, tvpi:+g4.tvpiVal().toFixed(2), mark:+C.paper.toFixed(0),
+              keeps:+(real + C.hype*0.15).toFixed(1), own:+g4.P.scale.toFixed(2)};
+    }));
+  }
+  const top = ladder[ladder.length-1], bot = ladder[0];
+  const trapWorks = top.tvpi > bot.tvpi * 1.5 && top.keeps < top.mark * 0.5;
+  add('L2', trapWorks?'PASS':'FAIL','TVPI is a purchasable lie',
+      `Same company, markups bought with reserves — ` +
+      ladder.map(l=>`${l.raises}: TVPI ${l.tvpi}x, mark $${l.mark}M, keeps $${l.keeps}M, own ${l.own}`).join(' · ') + '. ' +
+      (trapWorks
+        ? `The headline number is genuinely purchasable — ${bot.tvpi}x to ${top.tvpi}x — while the cash `+
+          `it converts to barely moves and your ownership shrinks to ${top.own}. Each purchase is `+
+          `locally thrilling and collectively fatal, and the capital it burns is the same capital that `+
+          `would have produced real value. The joke is charged, not captioned.`
+        : `Markups do not raise the watched number enough, or convert too well, so TVPI is still a `+
+          `caption on DPI rather than a purchase that costs you.`),
+      {ladder, fullRunPolicies:money});
+  add('L2','INFO','Cost of the lie across a whole run',
+      `Played straight → peak TVPI ${money.never.peakTvpi}x, DPI ${money.never.dpi}x. Buying every `+
+      `markup → peak ${money.always.peakTvpi}x, DPI ${money.always.dpi}x. Buying markups also raises `+
+      `follow-on prices for every later coin, so the button is seductive per-press and punishing per-run. `+
+      `That asymmetry is the design; watch that it stays a temptation rather than becoming a trap no `+
+      `informed player ever presses.`, money);
+
+  // Sirlin's counterpick test: an option need not be equal, only correct SOMEWHERE.
+  // Ask directly — at each level of purchased hype, does selling beat holding?
+  const sec = [];
+  for (let raises=0; raises<=3; raises++){
+    const g3 = boot(1500+raises);
+    sec.push(seeded(g3, ()=>{
+      g3.state='title'; g3.keys={action:true}; g3.update(F);
+      const C = g3.G.company;
+      for (let i=0;i<raises;i++){ g3.keys={raise:true}; g3.update(F); }
+      const real = C.paper - C.hype;
+      const hold = real + C.hype*0.15;
+      const sell = C.paper*0.5;
+      return {raises, hold:+hold.toFixed(1), sell:+sell.toFixed(1), sellWins: sell > hold};
+    }));
+  }
+  const sellEverWins = sec.some(s=>s.sellWins);
+  const breakeven = sec.find(s=>s.sellWins);
+  add('L2', sellEverWins?'PASS':'WARN','Secondary sale',
+      `hold-vs-sell by purchased markups — ` +
+      sec.map(s=>`${s.raises}: hold $${s.hold}M vs sell $${s.sell}M${s.sellWins?' ✓sell':''}`).join(' · ') + '. ' +
+      (sellEverWins
+        ? `Selling becomes correct from ${breakeven.raises} purchased markup(s) onward: once the mark is `+
+          `mostly air, a buyer paying 50% of it beats holding air that converts at 15%. The option is no `+
+          `longer dominated — it has a state where it wins, and that state is one the player creates.`
+        : `Selling never wins at any hype level, so it remains dominated.`),
+      {ladder:sec, breakevenRaises: breakeven ? breakeven.raises : null});
+
+  add('L2', secOK>0.8?'INFO':'PASS','Flag reach rate',
       `A competent run reaches the flag ${(secOK*100)|0}% of the time. Selling at 50% of the mark is `+
       (secOK>0.8
         ? `therefore dominated: you forfeit half your value to avoid a ~${(100-secOK*100)|0}% risk. It is `+

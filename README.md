@@ -12,7 +12,8 @@ companies. Nine of them are supposed to die.
 | `←` `→` or `A` `D` | Move |
 | `Space` (hold it) | Conviction jump — bigger check, further to fall |
 | `Enter` | **The Daily Fund** — 4 companies, ~2 minutes, same seed for everyone today |
-| `X` | Secondary sale. 50% of the mark, guaranteed, run over. |
+| `R` | Raise a round. Costs reserves, marks you up 2.5x, and every cent of it is air. |
+| `X` | Secondary sale — sells the *mark* at 50%. Sometimes that beats holding. |
 | `B` | Skip straight to the hot deal |
 | `C` (end screen) | Copy your fund card — emoji portfolio, DPI, quartile — and go paste it somewhere loud |
 
@@ -24,6 +25,16 @@ Losing companies is survivable. Whiffing the breakout is not.
 TVPI is the enormous number in the top-left and it climbs on every pickup. DPI
 is the small grey one underneath it. The end screen grades you on the small
 grey one.
+
+And TVPI is **purchasable**. Press `R` to raise a round: it costs dry powder,
+marks you up 2.5x, shrinks your sprite because you own less — and every cent of
+the markup converts to actual cash at fifteen cents. Three rounds takes you to
+a $156M mark that exits at $32M, while the pace line quietly reads FOURTH
+QUARTILE. The capital you spent making the number beautiful is the same capital
+that would have made it real.
+
+Once a mark is mostly air, selling it to someone else at half price beats
+holding it. That is not a bug.
 
 ## The Tier 1 VC
 

@@ -78,6 +78,24 @@ const DEAL_SECS  = 16;    // a rival is closing this round while you dance
 const BID_TIME   = 4;     // what a bid actually buys: seconds. money -> time.
 const RESERVE_PUSH_COST = 8;   // dry powder spendable in the room...
 const RESERVE_PUSH_SECS = 3;   // ...to hold the rival off. reserves' second sink.
+
+// ---- the mark is not the money -------------------------------------------
+// Paper you BUY with reserves ("hype") inflates TVPI in full and converts to DPI
+// at 15c. So the big number top-left is purchasable, and buying it consumes the
+// exact capital that would have produced real value. One resource, two opposed
+// goals — and the joke is charged rather than captioned.
+const HYPE_CONVERT = 0.15;
+const RAISE_COST = [8, 12, 18, 26, 36, 50];   // reserves to force a round, by round
+const SECONDARY_RATE = 0.5;   // a buyer pays half the MARK — air included
+
+// Published at fund start so bands are aimed at, not fallen into.
+const BANDS = [
+  {name:'TOP DECILE',      best:12,  dpi:2.5},
+  {name:'FIRST QUARTILE',  best:7,   dpi:1.5},
+  {name:'SECOND QUARTILE', best:3.5, dpi:0.8},
+  {name:'THIRD QUARTILE',  best:1.5, dpi:0.3},
+  {name:'FOURTH QUARTILE', best:0,   dpi:0},
+];
 const RIVALS = ['APEX PARTNERS','MERIDIAN','NORTHGATE','LATTICE','KESTREL CAPITAL'];
 const HOT_DEALS = [
   {name:'GROUNDTRUTH', pitch:'foundation models for HVAC'},
@@ -222,6 +240,7 @@ function spawnCompany() {
     roundCoins: 0,
     proRata: 0,             // seconds of coin doubler left
     fees: 0,                // seconds of 2&20 invincibility
+    hype: 0,                // portion of the mark that is purchased air
     hot: hot ? hot.name : null,
     mult: hot ? hot.mult : 1,   // what your ownership is worth per mark
   };
@@ -430,13 +449,37 @@ function update(dt) {
   // ---- the boss owns the rest of the frame
   if (G.mode === 'boss') return updateBoss(dt);
 
-  // ---- secondaries: cash out at 50%, company retired
+  // ---- raise a round: buy the big number with the capital that makes the real one
+  if (keys.raise && C) {
+    keys.raise = false;
+    const cost = RAISE_COST[Math.min(C.round, RAISE_COST.length-1)];
+    if (C.round >= ROUND_NAMES.length-1) {
+      sfx.denied(); toast('No one left to mark you up.', 1.8);
+    } else if (G.reserves < cost) {
+      sfx.denied(); toast('NO DRY POWDER — you cannot manufacture a round.', 2.2);
+    } else {
+      G.reserves -= cost; G.followOnSpent += cost;
+      // a 2.5x mark: the number leaps, which is the point. Every cent of it is air.
+      const bump = C.paper * 1.5;
+      C.paper += bump; C.hype += bump;
+      C.round++; C.roundCoins = 0;
+      P.scale *= DILUTE;                   // and you own less of it
+      sfx.markup(); burst(P.x, P.y - 30, 16, '#ffd75e', 240);
+      toast(ROUND_NAMES[C.round] + ' "closed". Marked to ' + fmtM(C.paper) +
+            '. You own less of a bigger number.', 3);
+    }
+  }
+
+  // ---- secondaries: a buyer pays half the MARK, air included. Sometimes right.
   if (keys.sec && C) {
     keys.sec = false;
-    const v = C.paper * 0.5;
+    const v = C.paper * SECONDARY_RATE;
     G.exits.push(v);
     G.story.push({t:'sec'});
-    toast('SECONDARY: sold at 50% of the mark. ' + fmtM(v) + ' DPI. Coward.', 3);
+    G.lastExit = v; G.lastMark = C.paper; G.lastHype = C.hype;
+    toast('SECONDARY: sold the mark at ' + (SECONDARY_RATE*100) + '%. ' +
+          fmtM(v) + ' realized.' + (C.hype > (C.paper-C.hype)*1.4
+            ? ' You sold the story before it was marked down.' : ' Coward.'), 3.2);
     sfx.markup();
     retireCompany('exit');
     return;
@@ -816,9 +859,11 @@ function killCompany(why) {
 }
 function exitCompany() {
   const C = G.company;
-  G.exits.push(C.paper);
-  G.lastExit = C.paper;
-  G.story.push({t: C.hot ? 'hot' : 'exit', m: C.paper / CHECK});
+  // the mark is not the money: air converts at 15c
+  const realized = (C.paper - C.hype) + C.hype * HYPE_CONVERT;
+  G.exits.push(realized);
+  G.lastExit = realized; G.lastMark = C.paper; G.lastHype = C.hype;
+  G.story.push({t: C.hot ? 'hot' : 'exit', m: realized / CHECK});
   burst(P.x, P.y - 30, 40, '#59d68f', 320); freeze = 5;
   sfx.exit();
   retireCompany('exit');
@@ -854,14 +899,26 @@ function copyShare() {
 }
 
 // grade: power law — only your best exit matters
+const BAND_TAG = {
+  'TOP DECILE':      'LPs return your calls first. Fund II is oversubscribed.',
+  'FIRST QUARTILE':  'One company carried the fund. It always does.',
+  'SECOND QUARTILE': 'Respectable. The word "solid" will haunt you.',
+  'THIRD QUARTILE':  'You will raise Fund III anyway.',
+  'FOURTH QUARTILE': 'Your TVPI was beautiful. Nobody could eat it.',
+};
+// Bands are published (see BANDS) so the player can aim at one mid-run.
+function bandFor(best, dpi) {
+  return BANDS.find(b => best >= b.best && dpi >= b.dpi) || BANDS[BANDS.length-1];
+}
 function grade() {
-  const best = bestExit() / CHECK; // multiple on the check
-  const dpi = dpiVal();
-  if (best >= 15 && dpi >= 1.5) return ['TOP DECILE', 'LPs return your calls first. Fund II is oversubscribed.'];
-  if (best >= 8)  return ['FIRST QUARTILE', 'One company carried the fund. It always does.'];
-  if (best >= 4)  return ['SECOND QUARTILE', 'Respectable. The word "solid" will haunt you.'];
-  if (best >= 1.5) return ['THIRD QUARTILE', 'You will raise Fund III anyway.'];
-  return ['FOURTH QUARTILE', 'Your TVPI was beautiful. Nobody could eat it.'];
+  const b = bandFor(bestExit()/CHECK, dpiVal());
+  return [b.name, BAND_TAG[b.name]];
+}
+// the band immediately above where you currently sit, for the HUD pace line
+function nextBand() {
+  const cur = bandFor(bestExit()/CHECK, dpiVal());
+  const i = BANDS.indexOf(cur);
+  return i > 0 ? BANDS[i-1] : null;
 }
 
 // ---------------------------------------------------------------- render
@@ -1234,6 +1291,17 @@ function drawHUD() {
     ctx.fillText('CO. #' + G.companyIdx + '  ' + (C.hot ? C.hot + '  ' : '') +
       ROUND_NAMES[C.round] +
       '  mark ' + fmtM(C.paper) + (C.proRata>0?'  [PRO RATA]':''), 20, 130);
+    // how much of that mark is air, and what it converts to
+    const air = C.hype / Math.max(1, C.paper);
+    const cost = RAISE_COST[Math.min(C.round, RAISE_COST.length-1)];
+    if (C.hype > 0) {
+      ctx.fillStyle = air > 0.5 ? '#ff6b81' : '#ffd75e'; ctx.font = '11px monospace';
+      ctx.fillText('  ' + (air*100).toFixed(0) + '% of that is paper → exits at ' +
+                   fmtM((C.paper - C.hype) + C.hype*HYPE_CONVERT), 20, 146);
+    }
+    ctx.font = '11px monospace';
+    ctx.fillStyle = G.reserves >= cost ? '#9ecbff' : '#3d3a52';
+    ctx.fillText('[R] raise a round — ' + fmtM(cost) + ' of reserves', 20, C.hype > 0 ? 162 : 148);
   } else {
     ctx.fillStyle = '#ffd75e'; ctx.fillText('IN A PROCESS', 20, 130);
   }
@@ -1259,7 +1327,22 @@ function drawHUD() {
     ctx.fillText('stand still in the door to pass', W-20, 90);
   } else {
     ctx.fillText('best exit: ' + (G.exits.length ? fmtM(bestExit()) : '—'), W-20, 72);
-    ctx.fillText('[X] secondary (coward\'s button)', W-20, 90);
+    ctx.fillText('[X] secondary — sells the MARK at ' + (SECONDARY_RATE*100) + '%', W-20, 90);
+  }
+
+  // published bands: what you are on pace for, and what the next one costs
+  {
+    const cur = bandFor(bestExit()/CHECK, dpiVal()), nb = nextBand();
+    ctx.textAlign = 'right'; ctx.font = 'bold 12px monospace';
+    ctx.fillStyle = '#b8b4cc';
+    ctx.fillText('ON PACE: ' + cur.name, W-20, 118);
+    if (nb) {
+      const needBest = nb.best*CHECK, needDpi = nb.dpi;
+      ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
+      ctx.fillText(nb.name + ' needs one exit ≥ ' + fmtM(needBest) +
+                   ' and DPI ' + needDpi.toFixed(1) + 'x', W-20, 134);
+      ctx.fillText('you: ' + fmtM(bestExit()) + ' · DPI ' + dpiVal().toFixed(2) + 'x', W-20, 148);
+    }
   }
 
   // the boss meter: it fills instead of emptying, because it is the price
@@ -1324,15 +1407,27 @@ function drawDeathCard() {
 }
 
 function drawExitCard() {
+  const got = G.exits[G.exits.length-1];
+  const mark = G.lastMark || got, hype = G.lastHype || 0;
+  const lost = mark - got;
   ctx.fillStyle = 'rgba(13,15,26,0.82)'; ctx.fillRect(0,0,W,H);
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#59d68f'; ctx.font = 'bold 30px monospace';
-  ctx.fillText('EXIT: ' + fmtM(G.exits[G.exits.length-1]), W/2, H/2 - 30);
-  ctx.font = '15px monospace'; ctx.fillStyle = '#e8e6f0';
-  ctx.fillText('Actual cash. DPI moves. LPs feel something.', W/2, H/2 + 8);
+  // the mark first, big and green — then what actually cleared
+  ctx.fillStyle = '#6a677f'; ctx.font = '16px monospace';
+  ctx.fillText('MARKED AT ' + fmtM(mark), W/2, H/2 - 66);
+  ctx.fillStyle = '#59d68f'; ctx.font = 'bold 32px monospace';
+  ctx.fillText('REALIZED ' + fmtM(got), W/2, H/2 - 26);
+  if (lost > 0.5) {
+    ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 14px monospace';
+    ctx.fillText('— ' + fmtM(lost) + ' of paper did not convert' +
+                 (hype > 0 ? ' (you bought ' + fmtM(hype) + ' of it)' : ''), W/2, H/2 + 6);
+  } else {
+    ctx.font = '15px monospace'; ctx.fillStyle = '#e8e6f0';
+    ctx.fillText('Actual cash. DPI moves. LPs feel something.', W/2, H/2 + 6);
+  }
   ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
-  ctx.fillText((bestExit() === G.exits[G.exits.length-1] ? 'New best exit. ' : '') +
-    'Only your best one counts.', W/2, H/2 + 34);
+  ctx.fillText((bestExit() === got ? 'New best exit. ' : '') +
+    'Only your best one counts.', W/2, H/2 + 38);
 }
 
 // ---------------------------------------------------------------- screens
@@ -1423,6 +1518,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyB') keys.boss = true;
   if (e.code === 'Enter') keys.daily = true;
   if (e.code === 'KeyC') keys.copy = true;
+  if (e.code === 'KeyR') keys.raise = true;
 });
 addEventListener('keyup', e => {
   if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;
