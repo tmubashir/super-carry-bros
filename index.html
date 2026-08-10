@@ -132,9 +132,9 @@ const sfx = {
 };
 
 // ---------------------------------------------------------------- level
-// Legend: # ground  = platform  b brick  t termsheet  s SAFE  U uncapped SAFE
-//         B board seat  P pro rata  M 2&20 mushroom  g goomba  F flag  C conveyor(founders)
-//         ^ spike pit marker (visual)
+// Terrain: # ground  = one-way platform  J bounce pad  C conveyor  G signing gate
+// Pickups: t termsheet  s SAFE  U uncapped SAFE  B board seat  P pro rata  M 2&20
+// Actors:  see the NPC table for enemy legends  ·  F flag  D pass door  X boss  H hot deal
 // 1-1 Demo Day, rebuilt: bounce pads (J) open sky routes, a moving platform (m)
 // spans the double pit, Serial Pivots (p) keep the ground honest, and the coins
 // trace the jump arcs they expect you to fly.
@@ -171,12 +171,30 @@ const ARENA_ROWS = [
 ];
 let gateOpen = false;   // the signing window. he is standing in front of it.
 
+// ---------------------------------------------------------------- level registry
+// Every playable space lives here with its rules. `mods` is where a level states
+// what it does differently — that is the hook new levels hang off, so adding one
+// is a map plus a mods object rather than a new branch in the update loop.
+const LEVELS = {
+  '1-1': { rows: LEVEL_ROWS, name: 'Demo Day',            mods: {} },
+  'boss': { rows: ARENA_ROWS, name: 'The Hot Deal',        mods: {} },
+};
+// which levels a normal company can land on, in order of appearance
+const PLAYLIST = ['1-1'];
+
 let MAP = LEVEL_ROWS, MAP_W = LEVEL_ROWS[0].length, MAP_H = LEVEL_ROWS.length;
 function setMap(rows) { MAP = rows; MAP_W = rows[0].length; MAP_H = rows.length; }
+// load a level by id: sets the tilemap and exposes its modifiers as G.mods
+function loadLevel(id) {
+  const L = LEVELS[id];
+  if (typeof G !== 'undefined' && G) { G.levelId = id; G.mods = L.mods || {}; }
+  setMap(L.rows);
+  return L;
+}
 
 // '=' platforms are one-way: they catch you on the way down and are not there
 // on the way up, so you never bonk a shoulder on the invisible half of a tile.
-const solidFull = ch => ch === '#' || ch === 'b' || ch === 'C' || (ch === 'G' && !gateOpen);
+const solidFull = ch => ch === '#' || ch === 'C' || (ch === 'G' && !gateOpen);
 const solidTop  = ch => solidFull(ch) || ch === '=' || ch === 'J';
 function tileAt(tx, ty) {
   if (tx < 0 || tx >= MAP_W) return '#';
@@ -207,6 +225,7 @@ function newRun(runMode) {
     nagIdx: 0, nextNag: SECS_PER_YEAR * 1.5,
     shake: 0,
     mode: 'level',
+    levelId: '1-1', mods: {},
     resolved: 0,            // companies that have exited or died
     bossQueue: daily ? [1, 2] : [1, 5],  // hot deals cross the desk early and often
     antiPortfolio: [],      // the ones you didn't get
@@ -232,7 +251,8 @@ function bestExit() { return G.exits.length ? Math.max(...G.exits) : 0; }
 
 function spawnCompany() {
   G.mode = 'level';
-  setMap(LEVEL_ROWS);
+  // the playlist decides which market condition this company gets dropped into
+  loadLevel(PLAYLIST[G.resolved % PLAYLIST.length]);
   const hot = G.pendingHot; G.pendingHot = null;
   G.company = {
     paper: CHECK,           // $10M in at seed
@@ -255,7 +275,7 @@ function spawnCompany() {
 
 function spawnBoss() {
   G.mode = 'boss';
-  setMap(ARENA_ROWS);
+  loadLevel('boss');
   gateOpen = false;
   G.company = null;
   const d = HOT_DEALS[G.hotIdx++ % HOT_DEALS.length];
@@ -305,6 +325,125 @@ function drawFx() {
   ctx.globalAlpha = 1;
 }
 
+// ---------------------------------------------------------------- NPC table
+// One entry per creature: how it spawns, thinks and draws, all in one place.
+// Adding an enemy is now a table entry plus a legend character, not three edits
+// scattered across update(), drawEnts() and spawnEntities().
+//   spawn(x, ty)  -> the entity object          (x,y are tile-centre helpers)
+//   update(e, dt) -> return a kill reason to end the company, or nothing
+//   draw(e)       -> render at world coords; return false to skip
+const NPC = {
+  goomba: {
+    legend: 'g',
+    spawn: (x, ty) => ({t:'goomba', x, y: ty*TILE + TILE - 13,
+      // enemies get faster as the fund ages, so replay #10 is not replay #1
+      vx:-(60 + (typeof G!=='undefined' && G ? (G.resolved||0)*16 : 0)),
+      w:26, h:26, dead:0}),
+    update(e, dt) {
+      if (e.dead) { e.dead += dt; return; }
+      e.x += e.vx * dt;
+      const etx0 = Math.floor((e.x - e.w/2 - 2)/TILE), etx1 = Math.floor((e.x + e.w/2 + 2)/TILE);
+      const ety = Math.floor(e.y/TILE);
+      const below0 = Math.floor((e.x - e.w/2)/TILE), below1 = Math.floor((e.x + e.w/2)/TILE);
+      const bty = Math.floor((e.y + e.h/2 + 4)/TILE);
+      if (solidFull(tileAt(e.vx<0?etx0:etx1, ety)) ||
+          !solidTop(tileAt(e.vx<0?below0:below1, bty))) e.vx *= -1;
+      const b = playerBox(), C = G.company;
+      if (rectHit(b.x,b.y,b.w,b.h, e.x-e.w/2, e.y-e.h/2, e.w, e.h)) {
+        if (P.vy > 150 && b.y + b.h < e.y + 4) {              // stomp
+          e.dead = 1; P.vy = -430; sfx.stomp();
+          freeze = 4; G.shake = Math.max(G.shake, 0.15);      // impact you can feel
+          burst(e.x, e.y, 12, '#ff8da5', 220);
+          C.paper += 1; toast('Restructured the round. +$1M mark.', 1.6);
+        } else if (C.fees > 0) {
+          e.dead = 1; sfx.stomp();          // fees make you invincible to consequences
+        } else return 'down round';
+      }
+    },
+    draw(e) {
+      if (e.dead && e.dead > 0.4) return false;
+      ctx.save(); ctx.translate(e.x, e.y);
+      if (e.dead) ctx.scale(1, 0.4);
+      ctx.fillStyle = '#c0455a'; ctx.fillRect(-13,-13,26,26);   // a chart trending down
+      ctx.strokeStyle = '#ffd9df'; ctx.lineWidth = 2; ctx.beginPath();
+      ctx.moveTo(-9,-6); ctx.lineTo(-2,0); ctx.lineTo(2,-3); ctx.lineTo(9,8); ctx.stroke();
+      ctx.fillStyle = '#2b1220';
+      ctx.fillRect(-8,4,4,4); ctx.fillRect(4,4,4,4);
+      ctx.restore();
+    },
+  },
+
+  pivot: {
+    legend: 'p',
+    forms: [['#c9a2ff','AI'],['#8fd8ff','B2B'],['#ffd75e','D2C'],['#ff9d76','WEB3']],
+    spawn: (x, ty) => ({t:'pivot', x, spawnX:x, y: ty*TILE + TILE - 13,
+      groundY: ty*TILE + TILE - 13,
+      vx:0, vy:0, hopT: 0.8, form: 0, w:26, h:26, dead:0}),
+    update(e, dt) {
+      if (e.dead) { e.dead += dt; return; }
+      // Serial Pivot: hops at you, changes what it claims to be mid-air
+      if (e.y >= e.groundY) {
+        e.y = e.groundY; e.vy = 0; e.vx = 0;
+        if ((e.hopT -= dt) <= 0) {
+          e.hopT = 1.1; e.form = (e.form + 1) % 4;
+          // territorial: lunges at you near its patch, hops home if it strayed
+          const home = Math.abs(e.x - e.spawnX) > TILE*2.5;
+          e.vy = -520;
+          e.vx = (home ? (e.spawnX > e.x ? 1 : -1) : (P.x > e.x ? 1 : -1)) * 135;
+        }
+      } else { e.vy += GRAV * 0.8 * dt; }
+      e.x += e.vx * dt; e.y += e.vy * dt;
+      if (e.y > e.groundY) e.y = e.groundY;
+      const b = playerBox(), C = G.company;
+      if (rectHit(b.x,b.y,b.w,b.h, e.x-e.w/2, e.y-e.h/2, e.w, e.h)) {
+        if (P.vy > 150 && b.y + b.h < e.y + 4) {
+          e.dead = 1; P.vy = -430; sfx.stomp();
+          freeze = 4; G.shake = Math.max(G.shake, 0.15);
+          burst(e.x, e.y, 12, '#c9a2ff', 220);
+          C.paper += 2; toast('Acqui-hired the pivot. +$2M mark.', 1.6);
+        } else if (C.fees > 0) { e.dead = 1; sfx.stomp(); }
+        else return 'pivoted into you';
+      }
+    },
+    draw(e) {
+      if (e.dead && e.dead > 0.4) return false;
+      const [col, tag] = NPC.pivot.forms[e.form];
+      ctx.save(); ctx.translate(e.x, e.y);
+      if (e.dead) ctx.scale(1, 0.4);
+      ctx.fillStyle = col; ctx.fillRect(-13,-13,26,26);
+      ctx.fillStyle = '#1a1030'; ctx.font = 'bold 9px monospace'; ctx.textAlign='center';
+      ctx.fillText(tag, 0, 2);
+      ctx.fillStyle = '#2b1220'; ctx.fillRect(-8,5,4,4); ctx.fillRect(4,5,4,4);
+      ctx.restore();
+    },
+  },
+
+  mover: {
+    legend: 'm',
+    spawn: (x, ty) => ({t:'mover', x, y: ty*TILE + 10, x0: x - TILE*3.5, x1: x + TILE*3.5,
+      dir:1, spd:85, w:TILE*2.6}),
+    update(e, dt) {
+      e.x += e.dir * e.spd * dt;
+      if (e.x > e.x1) { e.x = e.x1; e.dir = -1; }
+      if (e.x < e.x0) { e.x = e.x0; e.dir = 1; }
+      const b = playerBox(), feet = b.y + b.h;      // catch and carry the player
+      if (P.vy >= 0 && feet >= e.y - 8 && feet <= e.y + 14 &&
+          b.x + b.w > e.x - e.w/2 && b.x < e.x + e.w/2) {
+        P.y = e.y; P.vy = 0; P.onGround = true;
+        P.x += e.dir * e.spd * dt;
+      }
+    },
+    draw(e) {
+      ctx.save(); ctx.translate(e.x, e.y);
+      ctx.fillStyle = '#9c8348'; ctx.fillRect(-e.w/2, 0, e.w, 12);
+      ctx.fillStyle = '#d4af37'; ctx.fillRect(-e.w/2, 0, e.w, 4);
+      ctx.fillStyle = '#6b5a2e'; ctx.font='bold 9px monospace'; ctx.textAlign='center';
+      ctx.fillText(e.dir>0?'▶ BRIDGE ROUND ▶':'◀ BRIDGE ROUND ◀', 0, 10);
+      ctx.restore();
+    },
+  },
+};
+
 // entities (coins, enemies, founders, flag)
 let ents = [];
 function spawnEntities() {
@@ -317,14 +456,8 @@ function spawnEntities() {
     if (ch === 'B') ents.push({t:'coin', kind:'seat', x, y, r:12, taken:false});
     if (ch === 'P') ents.push({t:'coin', kind:'prorata', x, y, r:11, taken:false});
     if (ch === 'M') ents.push({t:'coin', kind:'fees', x, y, r:11, taken:false});
-    if (ch === 'g') ents.push({t:'goomba', x, y: ty*TILE + TILE - 13,
-                               vx:-(60 + (typeof G!=='undefined' && G ? (G.resolved||0)*16 : 0)),
-                               w:26, h:26, dead:0});
-    if (ch === 'p') ents.push({t:'pivot', x, spawnX:x, y: ty*TILE + TILE - 13,
-                               groundY: ty*TILE + TILE - 13,
-                               vx:0, vy:0, hopT: 0.8, form: 0, w:26, h:26, dead:0});
-    if (ch === 'm') ents.push({t:'mover', x, y: ty*TILE + 10, x0: x - TILE*3.5, x1: x + TILE*3.5,
-                               dir:1, spd:85, w:TILE*2.6});
+    // enemies come from the NPC table, keyed by their legend character
+    for (const type in NPC) if (NPC[type].legend === ch) ents.push(NPC[type].spawn(x, ty));
     if (ch === 'F' && ty === 7) ents.push({t:'flag', x: tx*TILE + TILE/2, y: ty*TILE});
     if (ch === 'X') ents.push({t:'boss', x, y:(ty+1)*TILE, groundY:(ty+1)*TILE,
                                face:-1, vx:0, vy:0, stun:0, mode:'idle',
@@ -490,64 +623,9 @@ function update(dt) {
     if (e.t === 'coin' && !e.taken) {
       const b = playerBox();
       if (rectHit(b.x,b.y,b.w,b.h, e.x-e.r, e.y-e.r, e.r*2, e.r*2)) collect(e);
-    } else if (e.t === 'goomba' && !e.dead) {
-      e.x += e.vx * dt;
-      const etx0 = Math.floor((e.x - e.w/2 - 2)/TILE), etx1 = Math.floor((e.x + e.w/2 + 2)/TILE);
-      const ety = Math.floor(e.y/TILE);
-      const below0 = Math.floor((e.x - e.w/2)/TILE), below1 = Math.floor((e.x + e.w/2)/TILE);
-      const bty = Math.floor((e.y + e.h/2 + 4)/TILE);
-      if (solidFull(tileAt(e.vx<0?etx0:etx1, ety)) ||
-          !solidTop(tileAt(e.vx<0?below0:below1, bty))) e.vx *= -1;
-      const b = playerBox();
-      if (rectHit(b.x,b.y,b.w,b.h, e.x-e.w/2, e.y-e.h/2, e.w, e.h)) {
-        if (P.vy > 150 && b.y + b.h < e.y + 4) { // stomp
-          e.dead = 1; P.vy = -430; sfx.stomp();
-          freeze = 4; G.shake = Math.max(G.shake, 0.15);        // impact you can feel
-          burst(e.x, e.y, 12, '#ff8da5', 220);
-          C.paper += 1; toast('Restructured the round. +$1M mark.', 1.6);
-        } else if (C.fees > 0) {
-          e.dead = 1; sfx.stomp(); // fees make you invincible to consequences
-        } else return killCompany('down round');
-      }
-    } else if (e.t === 'goomba' && e.dead) {
-      e.dead += dt;
-    } else if (e.t === 'pivot' && !e.dead) {
-      // Serial Pivot: hops at you, changes what it claims to be mid-air
-      if (e.y >= e.groundY) {
-        e.y = e.groundY; e.vy = 0; e.vx = 0;
-        if ((e.hopT -= dt) <= 0) {
-          e.hopT = 1.1; e.form = (e.form + 1) % 4;
-          // territorial: lunges at you near its patch, hops home if it strayed
-          const home = Math.abs(e.x - e.spawnX) > TILE*2.5;
-          e.vy = -520;
-          e.vx = (home ? (e.spawnX > e.x ? 1 : -1) : (P.x > e.x ? 1 : -1)) * 135;
-        }
-      } else { e.vy += GRAV * 0.8 * dt; }
-      e.x += e.vx * dt; e.y += e.vy * dt;
-      if (e.y > e.groundY) e.y = e.groundY;
-      const b2 = playerBox();
-      if (rectHit(b2.x,b2.y,b2.w,b2.h, e.x-e.w/2, e.y-e.h/2, e.w, e.h)) {
-        if (P.vy > 150 && b2.y + b2.h < e.y + 4) {
-          e.dead = 1; P.vy = -430; sfx.stomp();
-          freeze = 4; G.shake = Math.max(G.shake, 0.15);
-          burst(e.x, e.y, 12, '#c9a2ff', 220);
-          C.paper += 2; toast('Acqui-hired the pivot. +$2M mark.', 1.6);
-        } else if (C.fees > 0) { e.dead = 1; sfx.stomp(); }
-        else return killCompany('pivoted into you');
-      }
-    } else if (e.t === 'pivot' && e.dead) {
-      e.dead += dt;
-    } else if (e.t === 'mover') {
-      e.x += e.dir * e.spd * dt;
-      if (e.x > e.x1) { e.x = e.x1; e.dir = -1; }
-      if (e.x < e.x0) { e.x = e.x0; e.dir = 1; }
-      // catch and carry the player
-      const b3 = playerBox(), feet = b3.y + b3.h;
-      if (P.vy >= 0 && feet >= e.y - 8 && feet <= e.y + 14 &&
-          b3.x + b3.w > e.x - e.w/2 && b3.x < e.x + e.w/2) {
-        P.y = e.y; P.vy = 0; P.onGround = true;
-        P.x += e.dir * e.spd * dt;
-      }
+    } else if (NPC[e.t]) {
+      const why = NPC[e.t].update(e, dt);
+      if (why) return killCompany(why);
     } else if (e.t === 'founder') {
       e.pt += dt;
       e.x = e.baseX + Math.sin(e.pt*0.9)*6;
@@ -1091,35 +1169,8 @@ function drawEnts() {
         ctx.fillText('2/20', 0, -5);
         ctx.restore();
       }
-    } else if (e.t === 'goomba') {
-      if (e.dead && e.dead > 0.4) continue;
-      ctx.save(); ctx.translate(e.x, e.y);
-      if (e.dead) ctx.scale(1, 0.4);
-      // a little chart trending down
-      ctx.fillStyle = '#c0455a'; ctx.fillRect(-13,-13,26,26);
-      ctx.strokeStyle = '#ffd9df'; ctx.lineWidth = 2; ctx.beginPath();
-      ctx.moveTo(-9,-6); ctx.lineTo(-2,0); ctx.lineTo(2,-3); ctx.lineTo(9,8); ctx.stroke();
-      ctx.fillStyle = '#2b1220';
-      ctx.fillRect(-8,4,4,4); ctx.fillRect(4,4,4,4);
-      ctx.restore();
-    } else if (e.t === 'pivot') {
-      if (e.dead && e.dead > 0.4) continue;
-      const FORMS = [['#c9a2ff','AI'],['#8fd8ff','B2B'],['#ffd75e','D2C'],['#ff9d76','WEB3']];
-      const [col, tag] = FORMS[e.form];
-      ctx.save(); ctx.translate(e.x, e.y);
-      if (e.dead) ctx.scale(1, 0.4);
-      ctx.fillStyle = col; ctx.fillRect(-13,-13,26,26);
-      ctx.fillStyle = '#1a1030'; ctx.font = 'bold 9px monospace'; ctx.textAlign='center';
-      ctx.fillText(tag, 0, 2);
-      ctx.fillStyle = '#2b1220'; ctx.fillRect(-8,5,4,4); ctx.fillRect(4,5,4,4);
-      ctx.restore();
-    } else if (e.t === 'mover') {
-      ctx.save(); ctx.translate(e.x, e.y);
-      ctx.fillStyle = '#9c8348'; ctx.fillRect(-e.w/2, 0, e.w, 12);
-      ctx.fillStyle = '#d4af37'; ctx.fillRect(-e.w/2, 0, e.w, 4);
-      ctx.fillStyle = '#6b5a2e'; ctx.font='bold 9px monospace'; ctx.textAlign='center';
-      ctx.fillText(e.dir>0?'▶ BRIDGE ROUND ▶':'◀ BRIDGE ROUND ◀', 0, 10);
-      ctx.restore();
+    } else if (NPC[e.t]) {
+      NPC[e.t].draw(e);
     } else if (e.t === 'founder') {
       ctx.save(); ctx.translate(e.x, e.y);
       ctx.fillStyle = '#c9b089'; ctx.fillRect(-5,-24,10,9);          // head
