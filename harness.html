@@ -46,6 +46,7 @@
 // ============================================================================
 
 const F = 1/60;                       // fixed timestep; the game is dt-driven
+const CHECKV = 10;                    // CHECK, for ownership math in probes
 const findings = [];
 const add = (layer, sev, name, detail, metric) =>
   findings.push({layer, sev, name, detail, metric});
@@ -74,9 +75,9 @@ const EXPORTS = `;return{
   get G(){return G}, get ents(){return ents}, set ents(v){ents=v},
   get MAP(){return MAP}, get MAP_W(){return MAP_W}, get MAP_H(){return MAP_H},
   get gateOpen(){return gateOpen},
-  P, cam, update, render, newRun, nextScene, spawnBoss, spawnCompany, spawnEntities,
+  P, cam, update, render, newRun, spawnBoss, spawnCompany, spawnEntities, signRound,
   grade, tvpiVal, dpiVal, bestExit, deployed, playerBox, tileAt, solidTop, solidFull,
-  collect, killCompany, exitCompany, hitBoss, winHotDeal, loseDeal, rectHit,
+  collect, killCompany, hitBoss, rectHit,
   K:{TILE,GRAV,RUN,JUMP_MIN,JUMP_HOLD,HOLD_MAX,FUND_YEARS,SECS_PER_YEAR,CHECK,FUND_SIZE,
      START_RESERVES,ROUND_SIZE,DILUTE,FOLLOWON_COST,HOT_ENTRY,BID_STEP,HOT_TARGET,DEAL_SECS,
      LEVEL_ROWS,ARENA_ROWS,ROUND_NAMES}
@@ -98,7 +99,7 @@ function seeded(g, body){
 }
 
 // ---------------------------------------------------------------- invariants
-const INV = ['title','play','dead','exit','gameover','bossintro','dealwon','deallost'];
+const INV = ['title','play','dead','exit','gameover','bossintro','complete'];
 function checkInvariants(g, tag, bag){
   const {P,G} = g;
   const bad = (k,v)=>{ if(!bag.seen.has(k)){ bag.seen.add(k); bag.list.push(`${tag}: ${k} (${v})`);} };
@@ -214,7 +215,7 @@ function runGame(g, {skill=1, plan='wait', maxSec=460, bag=null}={}){
     const ev = {coins:0, markups:0, exits:0, deaths:0, dealsWon:0, dealsLost:0,
                 bids:0, free:0, rewardGaps:[], lastReward:0, bossSecs:0, levelSecs:0};
     let lastState=g.state, lastCoins=0;
-    for (; frames<60*maxSec && g.state!=='gameover'; frames++){
+    for (; frames<60*maxSec && g.state!=='gameover' && g.state!=='complete'; frames++){
       if (g.state!=='play'){ g.update(F); continue; }
       const inBoss = g.G.mode==='boss';
       inBoss ? ev.bossSecs+=F : ev.levelSecs+=F;
@@ -231,9 +232,8 @@ function runGame(g, {skill=1, plan='wait', maxSec=460, bag=null}={}){
         if (paper1>paper0) ev.coins++;
       }
       if (g.state==='dead' && lastState!=='dead') ev.deaths++;
-      if (g.state==='dealwon' && lastState!=='dealwon'){ ev.dealsWon++;
-        ev.bids+=g.G.lastHot.bids; ev.free+=g.G.lastHot.free; }
-      if (g.state==='deallost' && lastState!=='deallost') ev.dealsLost++;
+      if (g.state==='exit' && lastState!=='exit' && g.G.signed){ ev.dealsWon++;
+        ev.bids+=g.G.deal.bids; ev.free+=g.G.deal.free; }
       lastState = g.state;
       // softlock detector: alive, playing, but nothing changes for 12s
       if (prevX!==null && Math.abs(g.P.x-prevX)<0.5 && g.state==='play') still++; else still=0;
@@ -374,8 +374,9 @@ function probeDecisions(){
           const st = bossStep(g, jf, plan); jf=st.jf; st.keys.jump = jf-- > 0; g.keys=st.keys;
           g.update(F);
         }
-        return {won:g.state==='dealwon', secs:t0-(g.G.deal?g.G.deal.t:0),
-                val:g.G.lastHot?g.G.lastHot.val:null, own:g.G.lastHot?g.G.lastHot.own:null};
+        const won = g.state==='exit' && g.G.signed;
+        return {won, secs:t0-(g.G.deal?g.G.deal.t:0),
+                val:won?g.G.deal.val:null, own:won?+(CHECKV/g.G.deal.val*100).toFixed(1):null};
       });
       R[plan].push(r);
     }
@@ -403,7 +404,7 @@ function probeDecisions(){
             const st=bossStep(g2,jf,plan,lag); jf=st.jf; st.keys.jump=jf-->0; g2.keys=st.keys;
             g2.update(F);
           }
-          return g2.state==='dealwon';
+          return g2.state==='exit' && g2.G.signed;
         }));
       }
       lagged[plan+'@'+lag] = +(rs.filter(Boolean).length/rs.length).toFixed(2);
@@ -488,7 +489,7 @@ function probeDecisions(){
       rs.push(seeded(g2, ()=>{
         g2.state='title'; g2.keys={action:true}; g2.update(F);
         let jf=0, peak=0;
-        for (let f=0; f<60*300 && g2.state!=='gameover'; f++){
+        for (let f=0; f<60*300 && g2.state!=='gameover' && g2.state!=='complete'; f++){
           if (g2.state!=='play'){ g2.update(F); continue; }
           const inB = g2.G.mode==='boss';
           const st = inB ? bossStep(g2, jf, 'engaged') : levelStep(g2, jf, 1);
@@ -583,7 +584,7 @@ function probeDecisions(){
         : `a live option against that risk.`), {flagReachRate:+secOK.toFixed(2)});
 
   // --- legibility: does every terminal outcome state a cause?
-  const causes = ['lastPass','lastDealReason'].every(k => GAME_SRC.includes(k));
+  const causes = ['lastPass','deathOverride'].every(k => GAME_SRC.includes(k));
   add('L2', causes?'PASS':'FAIL','Loss legibility',
       causes ? 'Every death and lost deal surfaces a named cause on its card, so the player can '+
                'attribute the outcome to a decision rather than to noise.' : 'Some losses are unexplained.',
@@ -634,7 +635,7 @@ function probeLoop(){
     seeded(g2, ()=>{
       g2.state='title'; g2.keys={action:true}; g2.update(F);
       let jf=0, last='play';
-      for(let f=0; f<60*400 && g2.state!=='gameover'; f++){
+      for(let f=0; f<60*400 && g2.state!=='gameover' && g2.state!=='complete'; f++){
         if(g2.state!=='play'){ g2.update(F); continue; }
         const inB = g2.G.mode==='boss';
         const st = inB?bossStep(g2,jf,'wait'):levelStep(g2,jf,1);
@@ -749,7 +750,7 @@ function probeFairness(){
     g.state='title'; g.keys={boss:true}; g.update(F); g.state='play'; g.keys={};
     // stand at spawn doing nothing; measure how long until forced loss
     let f=0; for (; f<60*70 && g.state==='play'; f++){ g.keys={}; g.update(F); }
-    return {secs:f/60, reason:g.G.lastDealReason};
+    return {secs:f/60, reason:g.G.lastWhy};
   });
   add('FAIR','INFO','Idle survivability (boss room)',
       `Standing still, the player survives ${unavoidable.secs.toFixed(1)}s before "${unavoidable.reason||'—'}". `+
@@ -766,7 +767,7 @@ function probeBugs(){
   seeded(g, ()=>{
     // spam every input at once, every frame, for a full run
     g.state='title'; g.keys={action:true}; g.update(F);
-    for (let f=0; f<60*240 && g.state!=='gameover'; f++){
+    for (let f=0; f<60*240 && g.state!=='gameover' && g.state!=='complete'; f++){
       g.keys = {left:true,right:true,jump:true,sec:f%600===0,action:true,boss:false};
       g.update(F); if (f%5===0) checkInvariants(g,'input-spam',bag);
     }
@@ -775,7 +776,7 @@ function probeBugs(){
   seeded(g2, ()=>{  // let the fund clock expire mid-boss
     g2.state='title'; g2.keys={boss:true}; g2.update(F); g2.state='play';
     g2.G.clock = 0.4;
-    for (let f=0; f<60*30 && g2.state!=='gameover'; f++){ g2.keys={right:true}; g2.update(F);
+    for (let f=0; f<60*30 && g2.state!=='gameover' && g2.state!=='complete'; f++){ g2.keys={right:true}; g2.update(F);
       checkInvariants(g2,'clock-expiry-in-boss',bag); }
   });
   add('BUG', bag.list.length?'FAIL':'PASS','Invariant sweep',
@@ -938,7 +939,7 @@ function evalBoss(src, seeds){
         for (let f=0; f<60*80 && g.state==='play'; f++){
           const st=bossStep(g,jf,plan); jf=st.jf; st.keys.jump=jf-->0; g.keys=st.keys; g.update(F);
         }
-        return {won:g.state==='dealwon', own:g.G.lastHot?g.G.lastHot.own:0};
+        return (w=>({won:w, own:w?+(CHECKV/g.G.deal.val*100).toFixed(1):0}))(g.state==='exit'&&g.G.signed);
       }));
     }
   const agg = a => ({winRate:+(a.filter(r=>r.won).length/a.length).toFixed(2),
@@ -953,7 +954,7 @@ function evalBoss(src, seeds){
       for (let f=0; f<60*70 && g.state==='play'; f++){
         const st=bossStep(g,jf,'engaged',8); jf=st.jf; st.keys.jump=jf-->0; g.keys=st.keys; g.update(F);
       }
-      return {won:g.state==='dealwon', own:g.G.lastHot?g.G.lastHot.own:0};
+      return (w=>({won:w, own:w?+(CHECKV/g.G.deal.val*100).toFixed(1):0}))(g.state==='exit'&&g.G.signed);
     }));
   }
   return {bid:agg(plans.bid), wait:agg(plans.wait), platform:agg(plans.platform),

@@ -113,9 +113,8 @@ const BOSSES = {
     winded: 'WINDED — FREE HIT',
     beaten: '"Sorry — I have a board thing."',
     bidLine: (D) => fmtM(D.val) + ' — and ' + D.rival + ' has to wait.',
-    clockFatal: false,
-    fatal: { headline: 'RUN OVER BY THE ROUND',
-             line: 'they signed it while you were still on the floor.' },
+    loss: { headline: 'RUN OVER BY THE ROUND',
+            line: 'they signed it while you were still negotiating.' },
   },
   debt: {
     name: 'DEBT HOLDERS', pips: 'covenants',
@@ -128,9 +127,8 @@ const BOSSES = {
     winded: 'WAIVER GRANTED — FREE HIT',
     beaten: '"Fine. We\'ll amend and extend."',
     bidLine: (D) => fmtM(D.val) + ' of debt — and it sits ahead of you.',
-    clockFatal: true,     // maturity is maturity
-    fatal: { headline: 'DEBT HOLDERS TOOK OVER',
-             line: 'the equity was worth nothing on the way out.' },
+    loss: { headline: 'DEBT HOLDERS TOOK OVER',
+            line: 'the equity was worth nothing on the way out.' },
   },
 };
 function bossKind() { return (G && G.mods && G.mods.boss) || 'tier1'; }
@@ -221,7 +219,7 @@ const ARENA_ROWS = [
 ".............................G....",
 "...====......................G.F..",
 ".............................G....",
-".D.............X.............G..H.",
+"...............X.............G..H.",
 "##################################",
 "##################################",
 ];
@@ -256,8 +254,8 @@ const LEVELS = {
 // Beating a boss is what advances the world. The fund carousel is unchanged —
 // what changes is which level the next company gets dropped into.
 const WORLDS = [
-  { level: '1-1', boss: 'boss'  },
-  { level: '2-1', boss: 'boss2' },
+  { level: '1-1', boss: 'boss',  secs: 95,  exitMult: 1 },   // seed: small exits
+  { level: '2-1', boss: 'boss2', secs: 110, exitMult: 3 },   // growth: the carry
 ];
 
 let MAP = LEVEL_ROWS, MAP_W = LEVEL_ROWS[0].length, MAP_H = LEVEL_ROWS.length;
@@ -291,24 +289,22 @@ function newRun(runMode) {
   RNG = daily ? mulberry32(DAILY_NUM * 2654435761) : Math.random;
   G = {
     daily,
-    years: daily ? 4 : FUND_YEARS,   // the daily is a 4-year micro-fund: ~90s
-    companies: daily ? 4 : 10,       // remaining, incl. current
+    maxLives: daily ? 4 : 10,
+    companies: daily ? 4 : 10,  // lives. every death is a company written off.
     companyIdx: 1,          // which company we're on (1-based, for flavor)
     exits: [],              // realized exit values ($M)
     deadPaper: 0,           // paper value written to zero (for flavor)
     reserves: daily ? 25 : START_RESERVES,
     followOnSpent: 0,
-    clock: (daily ? 4 : FUND_YEARS) * SECS_PER_YEAR,
+    clock: 0,               // per-world runway, set on company spawn
     toast: null, toastT: 0,
-    nagIdx: 0, nextNag: SECS_PER_YEAR * 1.5,
+    nagIdx: 0, nextNag: 30,
     shake: 0,
     mode: 'level',
     levelId: '1-1', mods: {}, world: 0,
     resolved: 0,            // companies that have exited or died
-    bossQueue: daily ? [1, 2] : [1, 5],  // hot deals cross the desk early and often
-    antiPortfolio: [],      // the ones you didn't get
-    pendingHot: null,       // hot deal won, waiting to be played
-    dealFatal: null,        // set when a boss kills you — ends the fund
+    antiPortfolio: [],      // kept for the end screen; currently only flavour
+    signed: false,          // did the current 'exit' come from signing the round?
     hotIdx: 0,
     deal: null,
     story: [],              // one glyph per outcome — this becomes the share card
@@ -330,9 +326,9 @@ function bestExit() { return G.exits.length ? Math.max(...G.exits) : 0; }
 
 function spawnCompany() {
   G.mode = 'level';
-  // the playlist decides which market condition this company gets dropped into
-  loadLevel(WORLDS[G.world].level);
-  const hot = G.pendingHot; G.pendingHot = null;
+  loadLevel(WORLDS[G.world].level);   // the world you're in decides the level
+  G.clock = WORLDS[G.world].secs;     // runway resets with every company
+  G.nextNag = G.clock * 0.45;
   G.company = {
     paper: CHECK,           // $10M in at seed
     round: 0,               // 0 = seed
@@ -341,40 +337,46 @@ function spawnCompany() {
     fees: 0,                // seconds of 2&20 invincibility
     accel: 0,               // seconds of AI ACCELERATION left
     hype: 0,                // portion of the mark that is purchased air
-    hot: hot ? hot.name : null,
-    mult: hot ? hot.mult : 1,   // what your ownership is worth per mark
   };
   P.x = TILE * 2.5; P.y = TILE * 8; P.vx = 0; P.vy = 0; P.dir = 1;
-  // paid up for the hot deal? you own less of it, so you start smaller.
-  P.scale = hot ? 0.6 + 0.4 * Math.min(1, hot.mult / 4) : 1;
+  P.scale = 1;
   P.onGround = false; P.holdT = 0; P.dead = false;
   cam.x = 0;
   spawnEntities();
-  if (hot) toast(hot.name + ' — you own ' + hot.own.toFixed(1) + '% of it.', 3);
 }
 
+// The end of every level. Your company arrives at its round and the boss is
+// standing in front of the signature. Same company, same paper, same hype —
+// the fight prices THIS company's exit.
 function spawnBoss() {
   G.mode = 'boss';
   loadLevel(WORLDS[G.world].boss);
   gateOpen = false;
-  G.company = null;
-  const d = HOT_DEALS[G.hotIdx++ % HOT_DEALS.length];
-  G.deal = { name:d.name, pitch:d.pitch, val:HOT_ENTRY, bids:0, free:0,
-             t:DEAL_SECS, t0:DEAL_SECS, passT:0, hp:3,
-             rival: RIVALS[G.hotIdx % RIVALS.length] };
+  G.deal = { val:HOT_ENTRY, bids:0, free:0,
+             t:DEAL_SECS, t0:DEAL_SECS, hp:3,
+             rival: RIVALS[G.world % RIVALS.length] };
   P.x = TILE * 4; P.y = TILE * 10; P.vx = 0; P.vy = 0; P.dir = 1;
-  P.scale = 1; P.onGround = true; P.holdT = 0; P.dead = false;
+  P.onGround = true; P.holdT = 0; P.dead = false;
   cam.x = 0;
   spawnEntities();
   state = 'bossintro'; stateTimer = 0;
 }
 
-// what comes across the desk next
-function nextScene() {
-  if (G.bossQueue.length && G.resolved >= G.bossQueue[0]) {
-    G.bossQueue.shift(); return spawnBoss();
-  }
-  G.companyIdx++; spawnCompany(); state = 'play';
+// Signing the round — the flag behind the beaten boss. Bids diluted you:
+// the exit realizes at HOT_ENTRY/val of what it would have been.
+function signRound() {
+  const C = G.company, D = G.deal;
+  const dilute = HOT_ENTRY / D.val;
+  const stage = WORLDS[G.world].exitMult;
+  const realized = ((C.paper - C.hype) + C.hype * HYPE_CONVERT) * stage * dilute;
+  G.exits.push(realized);
+  G.lastExit = realized; G.lastMark = C.paper * stage; G.lastHype = C.hype * stage;
+  G.lastDilute = dilute;
+  G.story.push({t:'exit', m: realized / CHECK});
+  G.resolved++; G.signed = true;
+  burst(P.x, P.y - 30, 40, '#59d68f', 320); freeze = 8;
+  sfx.exit();
+  state = 'exit'; stateTimer = 0;
 }
 
 // player
@@ -631,9 +633,7 @@ function spawnEntities() {
                                face:-1, vx:0, vy:0, stun:0, mode:'idle',
                                timer:1.4, next:'pound', shots:0, shotT:0, tx:x,
                                shoveT:0, hp:3, defeated:0});
-    if (ch === 'H') ents.push({t:'hotdeal', x, y:(ty+1)*TILE});
-    if (ch === 'D') ents.push({t:'door', x, y:(ty+1)*TILE});
-  }
+    }
   // founders on the demo-day conveyor
   if (MAP.some(r => r.indexOf('C') >= 0))
     for (let i = 0; i < 5; i++)
@@ -665,9 +665,9 @@ function frame(ts) {
 function update(dt) {
   stateTimer += dt;
   if (state === 'title') {
-    if (keys.boss) {                       // straight to the hot deal
+    if (keys.boss) {                       // straight to the boss room
       keys.boss = false; keys.action = false;
-      newRun(); G.resolved = 1; nextScene(); return;
+      newRun(); spawnBoss(); return;
     }
     if (keys.daily) { keys.daily = false; keys.action = false; newRun('daily'); return; }
     if (keys.action) { keys.action = false; newRun(); }
@@ -682,25 +682,44 @@ function update(dt) {
     if (stateTimer > 3.6 || (keys.action && stateTimer > 0.6)) { keys.action=false; state='play'; }
     return;
   }
-  if (state === 'dead' || state === 'exit' || state === 'dealwon' || state === 'deallost') {
-    const wait = state==='dead' ? 2.4 : state==='exit' ? 2.8 : 4.2;
+  if (state === 'complete') {
+    if (keys.copy) { keys.copy = false; copyShare(); }
+    if (keys.action && stateTimer > 1.5) { keys.action = false; state = 'title'; }
+    return;
+  }
+  if (state === 'dead' || state === 'exit') {
+    const wait = state==='dead' ? 2.4 : 3.0;
     if (stateTimer > wait || (keys.action && stateTimer > 1.0)) {
       keys.action = false;
-      // a boss killing you ends the fund. losing the deal never does.
-      if (G.dealFatal || G.companies <= 0 || G.clock <= 0) { endRun(); }
-      else nextScene();
+      if (state === 'exit' && G.signed) {
+        // the round is signed: the world changes, or the fund is returned
+        G.signed = false;
+        if (G.world + 1 >= WORLDS.length) { state = 'complete'; stateTimer = 0; return; }
+        G.world++; G.companyIdx++; spawnCompany(); state = 'play'; return;
+      }
+      // a death or a secondary: next company retries the SAME world
+      if (G.companies <= 0) { endRun(); return; }
+      G.companyIdx++; spawnCompany(); state = 'play';
     }
     return;
   }
 
-  // ---- fund clock
-  G.clock -= dt;
-  G.nextNag -= dt;
-  if (G.nextNag <= 0) {
-    toast('📩 ' + LP_NAGS[G.nagIdx++ % LP_NAGS.length], 2.6);
-    G.nextNag = SECS_PER_YEAR * (1.5 - Math.min(1, (1 - G.clock/(G.years*SECS_PER_YEAR))) * 1.1);
+  // ---- runway: this company's clock through the level. dying of it is a death.
+  if (G.mode === 'level') {
+    G.clock -= dt;
+    G.nextNag -= dt;
+    if (G.nextNag <= 0) {
+      toast('📩 ' + LP_NAGS[G.nagIdx++ % LP_NAGS.length], 2.6);
+      G.nextNag = Math.max(8, G.clock * 0.5);
+    }
+    if (G.clock <= 0) {
+      G.clock = 0;
+      return killCompany('ran out of runway', {
+        headline: 'OUT OF RUNWAY',
+        line: 'the round was right there. payroll was not.',
+      });
+    }
   }
-  if (G.clock <= 0) { G.clock = 0; toast('FUND TERM EXPIRED', 2); endRun(); return; }
 
   const C = G.company;
   if (C) { if (C.proRata > 0) C.proRata -= dt; if (C.fees > 0) C.fees -= dt;
@@ -748,9 +767,11 @@ function update(dt) {
   }
 
   // fell off the map
-  if (P.y > H + 120) return G.mode === 'boss'
-    ? loseDeal('You fell out of the process.', false, true)
-    : killCompany('down round → mark to zero');
+  if (P.y > H + 120) return killCompany('down round → mark to zero',
+    G.mode === 'boss' ? BOSS().loss : null);
+
+  // ---- the end of the level is the round, and he is standing in front of it
+  if (G.mode === 'level' && P.x > (MAP_W - 1.5) * TILE) return spawnBoss();
 
   // ---- the boss owns the rest of the frame
   if (G.mode === 'boss') return updateBoss(dt);
@@ -804,9 +825,6 @@ function update(dt) {
     } else if (e.t === 'founder') {
       e.pt += dt;
       e.x = e.baseX + Math.sin(e.pt*0.9)*6;
-    } else if (e.t === 'flag') {
-      const b = playerBox();
-      if (b.x + b.w > e.x - 6) return exitCompany();
     }
   }
 }
@@ -877,10 +895,7 @@ function updateBoss(dt) {
   const bossRef = ents.find(e => e.t === 'boss');
   D.dis = !!(bossRef && !bossRef.defeated && Math.abs(P.x - bossRef.x) > 300);
   D.t -= dt * (D.dis ? 2.6 : 1);
-  if (D.t <= 0) return loseDeal(
-    BOSS().clockFatal ? 'The note matured. Nobody refinanced you.'
-                      : D.rival + ' signed it while you were negotiating.',
-    false, BOSS().clockFatal);
+  if (D.t <= 0) return killCompany('the round closed', BOSS().loss);
 
   const pb = playerBox();
 
@@ -897,12 +912,6 @@ function updateBoss(dt) {
     } else { sfx.denied(); toast('No dry powder left to burn.', 1.6); }
   }
 
-  // the door: you can just walk out. it costs you nothing today.
-  const door = ents.find(e => e.t === 'door');
-  if (door && Math.abs(P.x - door.x) < 15 && Math.abs(P.vx) < 1 && P.onGround) {  // deliberate: stand still in the doorway
-    D.passT += dt;
-    if (D.passT >= 1.2) return loseDeal('You walked out of the room.', true);
-  } else D.passT = Math.max(0, D.passT - dt*2);
 
   // TIER 1 VC, rebuilt as a real fight: every attack telegraphs, contact while
   // he strolls is a shove (not a death), and the skill is baiting the dash —
@@ -977,7 +986,7 @@ function updateBoss(dt) {
     if (rectHit(pb.x,pb.y,pb.w,pb.h, bx,by,BW,BH)) {
       if (P.vy > 120 && pb.y + pb.h < by + 34) hitBoss(b);
       else if (b.mode === 'dash' && b.stun <= 0)
-        return loseDeal('Run over mid-pre-empt.', false, true);
+        return killCompany('run over mid-pre-empt', BOSS().loss);
       else if (b.stun <= 0 && b.mode !== 'winded') {
         // strolling contact is a shove, not a death — deaths come from attacks
         P.x = b.x + (P.x < b.x ? -1 : 1) * (BW/2 + 22);
@@ -993,16 +1002,16 @@ function updateBoss(dt) {
       e.vy += GRAV*0.55*dt; e.x += e.vx*dt; e.y += e.vy*dt;
       if (e.y > H + 80 || e.x < -60 || e.x > MAP_W*TILE + 60) e.gone = true;
       else if (rectHit(pb.x,pb.y,pb.w,pb.h, e.x-9,e.y-11,18,22))
-        return loseDeal(BOSS().volley + '. It landed before you did.', false, true);
+        return killCompany('pre-empted', BOSS().loss);
     } else if (e.t === 'wave') {
       e.x += e.vx*dt;
       if (e.x < -60 || e.x > MAP_W*TILE + 60) e.gone = true;
       else if (rectHit(pb.x,pb.y,pb.w,pb.h, e.x-16,e.y-22,32,22))
-        return loseDeal(BOSS().pound + '. The floor came up.', false, true);
+        return killCompany('foreclosed on', BOSS().loss);
     } else if (e.t === 'float') {
       e.y -= 46*dt; if ((e.life -= dt) <= 0) e.gone = true;
     } else if (e.t === 'flag') {
-      if (pb.x + pb.w > e.x - 6) return winHotDeal();   // the gate is open. sign it.
+      if (pb.x + pb.w > e.x - 6) return signRound();    // the gate is open. sign it.
     }
   }
 }
@@ -1038,33 +1047,6 @@ function hitBoss(b) {
     sfx.exit();
     toast('"We\'re out at this price." THE SIGNING WINDOW IS OPEN.', 3);
   }
-}
-
-function winHotDeal() {
-  const D = G.deal;
-  G.lastHot = G.pendingHot = {
-    name: D.name, pitch: D.pitch, val: D.val, bids: D.bids, free: D.free,
-    mult: HOT_TARGET / D.val,          // you own less, so you make less
-    own:  CHECK / D.val * 100,
-  };
-  // beating a boss changes the world under you — the very next company lands
-  // in the next level, carrying the hot deal with it
-  G.world = Math.min(G.world + 1, WORLDS.length - 1);
-  sfx.exit();
-  state = 'dealwon'; stateTimer = 0;
-}
-
-// `fatal` = the boss actually killed you. Losing the deal on the clock or
-// walking out still costs nothing today; being run over does not.
-function loseDeal(reason, passed, fatal) {
-  const D = G.deal;
-  G.story.push({t: fatal ? 'ko' : passed ? 'pass' : 'lost'});
-  G.antiPortfolio.push({ name: D.name, pitch: D.pitch, passed: !!passed,
-                         mark: 1400 + RNG()*2600 });
-  G.lastDealReason = reason; G.lastDealPassed = !!passed;
-  G.dealFatal = fatal ? (BOSSES[bossKind()].fatal) : null;
-  sfx.death();
-  state = 'deallost'; stateTimer = 0;
 }
 
 // ---------------------------------------------------------------- economy
@@ -1119,7 +1101,6 @@ function collect(e) {
 // `override` = {headline, line} for deaths that have their own thing to say.
 // Without it a death picks a random pass line, which is the normal case.
 function killCompany(why, override) {
-  if (G.mode === 'boss') return loseDeal(why);
   const C = G.company;
   G.deadPaper += C.paper;
   G.companies--; G.resolved++;
@@ -1129,17 +1110,6 @@ function killCompany(why, override) {
   G.deathOverride = override || null;
   sfx.death();
   state = 'dead'; stateTimer = 0;
-}
-function exitCompany() {
-  const C = G.company;
-  // the mark is not the money: air converts at 15c
-  const realized = (C.paper - C.hype) + C.hype * HYPE_CONVERT;
-  G.exits.push(realized);
-  G.lastExit = realized; G.lastMark = C.paper; G.lastHype = C.hype;
-  G.story.push({t: C.hot ? 'hot' : 'exit', m: realized / CHECK});
-  burst(P.x, P.y - 30, 40, '#59d68f', 320); freeze = 5;
-  sfx.exit();
-  retireCompany('exit');
 }
 function retireCompany(mode) {
   G.companies--; G.resolved++;
@@ -1202,6 +1172,7 @@ function render(dt) {
 
   if (state === 'title') return renderTitle();
   if (state === 'gameover') { ctx.restore(); return renderGameOver(); }
+  if (state === 'complete') { ctx.restore(); return renderComplete(); }
 
   if (G.shake > 0) ctx.translate((Math.random()-0.5)*8, (Math.random()-0.5)*8);
 
@@ -1225,8 +1196,6 @@ function render(dt) {
   if (state === 'dead') drawDeathCard();
   if (state === 'exit') drawExitCard();
   if (state === 'bossintro') drawBossIntro();
-  if (state === 'dealwon') drawDealWon();
-  if (state === 'deallost') drawDealLost();
   ctx.restore();
 }
 
@@ -1234,70 +1203,26 @@ function drawBossIntro() {
   ctx.fillStyle = 'rgba(13,15,26,0.88)'; ctx.fillRect(0,0,W,H);
   ctx.textAlign = 'center';
   ctx.fillStyle = bossKind()==='debt' ? '#c0455a' : '#ffd75e'; ctx.font = 'bold 32px monospace';
-  ctx.fillText(bossKind()==='debt' ? 'THE RECAP' : 'A HOT DEAL', W/2, H/2 - 78);
-  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 21px monospace';
-  ctx.fillText(G.deal.name + ' — ' + G.deal.pitch, W/2, H/2 - 34);
-  ctx.fillStyle = '#b8b4cc'; ctx.font = '15px monospace';
-  ctx.fillText(G.deal.rival + ' is closing it. You have ' + DEAL_SECS + ' seconds.', W/2, H/2 + 2);
+  ctx.fillText(bossKind()==='debt' ? 'THE RECAP' : 'THE ROUND', W/2, H/2 - 82);
+  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 19px monospace';
+  ctx.fillText('Your company made it to the signature.', W/2, H/2 - 44);
   ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 17px monospace';
-  ctx.fillText(BOSS().intro, W/2, H/2 + 38);
+  ctx.fillText(BOSS().intro, W/2, H/2 - 12);
+  // the objective, in one box
+  ctx.strokeStyle = '#584d78'; ctx.lineWidth = 1;
+  ctx.strokeRect(W/2 - 300, H/2 + 8, 600, 96);
+  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 14px monospace';
+  ctx.fillText('OBJECTIVE: knock him out of the deal — 3 hits — then sign behind him.', W/2, H/2 + 32);
+  ctx.fillStyle = '#59d68f'; ctx.font = '13px monospace';
+  ctx.fillText('Hits while ' + BOSS().winded.split(' — ')[0] + ' are FREE.', W/2, H/2 + 56);
+  ctx.fillStyle = '#ffd75e';
+  ctx.fillText('Any other hit is a bid: +' + fmtM(BID_STEP) + ' on the price, paid out of YOUR exit.',
+               W/2, H/2 + 78);
   ctx.fillStyle = '#6a677f'; ctx.font = '13px monospace';
-  ctx.fillText(bossKind()==='debt'
-    ? 'Three hits and they amend. Every hit adds debt ahead of you —'
-    : 'Three hits and he walks. Every hit you land is a bid —', W/2, H/2 + 68);
-  ctx.fillText(bossKind()==='debt' ? 'unless a waiver is on the table.'
-                                   : 'unless you catch him winded.', W/2, H/2 + 88);
+  ctx.fillText((bossKind()==='debt' ? 'The note matures in ' : G.deal.rival + ' signs in ') +
+               DEAL_SECS + 's. Lose the room, lose the company.', W/2, H/2 + 124);
 }
 
-function drawDealWon() {
-  const h = G.lastHot;
-  ctx.fillStyle = 'rgba(13,15,26,0.88)'; ctx.fillRect(0,0,W,H);
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffd75e'; ctx.font = 'bold 33px monospace';
-  ctx.fillText('YOU WON THE HOT DEAL', W/2, H/2 - 84);
-  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 20px monospace';
-  ctx.fillText(h.name, W/2, H/2 - 48);
-  ctx.font = '15px monospace'; ctx.fillStyle = '#b8b4cc';
-  ctx.fillText('Entry ' + fmtM(h.val) + ' post   ·   ' + h.bids + ' bid' +
-               (h.bids === 1 ? '' : 's') + ', ' + h.free + ' free', W/2, H/2 - 16);
-  ctx.font = 'bold 24px monospace';
-  ctx.fillStyle = h.own >= 12 ? '#59d68f' : h.own >= 6 ? '#ffd75e' : '#ff6b81';
-  ctx.fillText('You own ' + h.own.toFixed(1) + '%', W/2, H/2 + 24);
-  ctx.font = '14px monospace'; ctx.fillStyle = '#6a677f';
-  ctx.fillText(h.bids === 0
-    ? 'You beat him without bidding once. This one can return the fund.'
-    : h.bids <= 2 ? 'You paid up a little. It can still work.'
-    : h.bids <= 4 ? 'You will need a ' + fmtM(h.val*10) + ' outcome to care about this.'
-    : 'Congratulations. You bought a very expensive average company.', W/2, H/2 + 58);
-  // the world changed under you
-  ctx.font = 'bold 15px monospace'; ctx.fillStyle = '#9ecbff';
-  ctx.fillText('NOW ENTERING ' + WORLDS[G.world].level + ' · ' +
-               LEVELS[WORLDS[G.world].level].name.toUpperCase(), W/2, H/2 + 92);
-}
-
-function drawDealLost() {
-  const a = G.antiPortfolio[G.antiPortfolio.length-1];
-  const F = G.dealFatal;
-  ctx.fillStyle = 'rgba(13,15,26,0.88)'; ctx.fillRect(0,0,W,H);
-  ctx.textAlign = 'center';
-  ctx.fillStyle = F ? '#ff6b81' : G.lastDealPassed ? '#b8b4cc' : '#ff6b81';
-  ctx.font = 'bold 29px monospace';
-  ctx.fillText(F ? F.headline : G.lastDealPassed ? 'YOU PASSED' : 'YOU LOST THE DEAL',
-               W/2, H/2 - 52);
-  ctx.fillStyle = '#e8e6f0'; ctx.font = '16px monospace';
-  ctx.fillText(F ? F.line : G.lastDealReason, W/2, H/2 - 14);
-  ctx.fillStyle = '#6a677f'; ctx.font = '14px monospace';
-  if (F) {
-    ctx.fillText(G.lastDealReason, W/2, H/2 + 22);
-    ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 18px monospace';
-    ctx.fillText('RUN OVER', W/2, H/2 + 52);
-  } else {
-    ctx.fillText(a.name + ' goes to the anti-portfolio.', W/2, H/2 + 22);
-    ctx.fillText('Costs you nothing today.', W/2, H/2 + 46);
-  }
-}
-
-// which visual theme the current map wants; 1-1 stays exactly as it was
 function theme() { return (G && G.mods && G.mods.theme) || 'night'; }
 // per-theme tile palette. Platforms stay wood-gold in both so the one-way
 // rule keeps reading the same way across worlds.
@@ -1568,31 +1493,6 @@ function drawEnts() {
       ctx.font = 'bold 20px monospace'; ctx.textAlign = 'center';
       ctx.fillStyle = e.col || '#ffd75e'; ctx.fillText(e.txt, e.x, e.y);
       ctx.globalAlpha = 1;
-    } else if (e.t === 'door') {
-      ctx.fillStyle = '#1b2036'; ctx.fillRect(e.x-22, e.y-62, 44, 62);
-      ctx.fillStyle = '#39415e'; ctx.fillRect(e.x-18, e.y-56, 36, 56);
-      ctx.fillStyle = '#b8b4cc'; ctx.font = 'bold 11px monospace'; ctx.textAlign='center';
-      ctx.fillText('PASS', e.x, e.y-30);
-      if (G.deal && G.deal.passT > 0) {
-        ctx.fillStyle = '#2b2840'; ctx.fillRect(e.x-24, e.y-78, 48, 7);
-        ctx.fillStyle = '#ffd75e';
-        ctx.fillRect(e.x-24, e.y-78, 48*Math.min(1, G.deal.passT/1.2), 7);
-      }
-    } else if (e.t === 'hotdeal') {
-      const g = 0.5 + 0.5*Math.sin(performance.now()/200);
-      ctx.save(); ctx.translate(e.x, e.y);
-      ctx.fillStyle = 'rgba(255,215,94,' + (0.10 + g*0.14).toFixed(3) + ')';
-      ctx.beginPath(); ctx.arc(0,-24, 36 + g*7, 0, 7); ctx.fill();
-      ctx.fillStyle = '#c9b089'; ctx.fillRect(-6,-40,12,11);
-      ctx.fillStyle = '#39415e'; ctx.fillRect(-8,-29,16,18);
-      ctx.fillStyle = '#8d94ad'; ctx.fillRect(-8,-29,3,18); ctx.fillRect(5,-29,3,18);
-      ctx.fillStyle = '#b0996b'; ctx.fillRect(-7,-11,6,11); ctx.fillRect(1,-11,6,11);
-      ctx.textAlign = 'center';
-      ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#ffd75e';
-      ctx.fillText(G.deal.name, 0, -62);
-      ctx.font = '10px monospace'; ctx.fillStyle = '#b8b4cc';
-      ctx.fillText('"' + G.deal.pitch + '"', 0, -49);
-      ctx.restore();
     } else if (e.t === 'flag') {
       ctx.save(); ctx.translate(e.x, 0);
       ctx.fillStyle = '#b8b4cc'; ctx.fillRect(-2, TILE*4.2, 4, TILE*5.8);
@@ -1682,7 +1582,7 @@ function drawHUD() {
   // portfolio dots
   ctx.font = '12px monospace'; ctx.fillStyle = '#b8b4cc';
   ctx.fillText('PORTFOLIO', 20, 90);
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < G.maxLives; i++) {
     const alive = i < G.companies;
     ctx.fillStyle = alive ? '#59d68f' : '#43405c';
     ctx.beginPath(); ctx.arc(100 + i*16, 86, 5, 0, 7); ctx.fill();
@@ -1713,26 +1613,28 @@ function drawHUD() {
     ctx.fillStyle = '#ffd75e'; ctx.fillText('IN A PROCESS', 20, 130);
   }
 
-  // fund clock — top right, escalating dread
-  const yrsLeft = G.clock / SECS_PER_YEAR;
-  const yr = G.years - yrsLeft;
+  // world + runway — top right. the runway is this company's life expectancy.
+  const wsecs = WORLDS[G.world].secs, rfrac = Math.max(0, G.clock / wsecs);
   ctx.textAlign = 'right';
   ctx.font = 'bold 18px monospace';
-  ctx.fillStyle = yrsLeft < 2 ? '#ff6b81' : yrsLeft < 4 ? '#ffd75e' : '#b8b4cc';
-  ctx.fillText((G.daily ? 'DAILY #' + DAILY_NUM + ' · YR ' : 'FUND YEAR ') +
-    Math.min(G.years, Math.floor(yr)+1) + '/' + G.years, W-20, 38);
-  // clock bar
-  ctx.fillStyle = '#2b2840'; ctx.fillRect(W-220, 48, 200, 8);
-  ctx.fillStyle = yrsLeft < 2 ? '#ff6b81' : '#59d68f';
-  ctx.fillRect(W-220, 48, 200 * (G.clock/(G.years*SECS_PER_YEAR)), 8);
+  ctx.fillStyle = '#b8b4cc';
+  ctx.fillText((G.daily ? 'DAILY #' + DAILY_NUM + ' · ' : '') +
+    'WORLD ' + WORLDS[G.world].level + ' · ' + LEVELS[G.levelId].name.toUpperCase(), W-20, 38);
+  if (G.mode === 'level') {
+    ctx.font = '11px monospace';
+    ctx.fillStyle = rfrac < 0.25 ? '#ff6b81' : '#6a677f';
+    ctx.fillText('RUNWAY ' + Math.ceil(G.clock) + 's', W-226, 55);
+    ctx.fillStyle = '#2b2840'; ctx.fillRect(W-220, 48, 200, 8);
+    ctx.fillStyle = rfrac < 0.25 ? '#ff6b81' : '#59d68f';
+    ctx.fillRect(W-220, 48, 200 * Math.min(1, rfrac), 8);
+  }
   ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
   if (G.mode === 'boss') {
     ctx.fillStyle = G.reserves >= RESERVE_PUSH_COST ? '#9ecbff' : '#3d3a52';
     ctx.fillText('[X] burn $' + RESERVE_PUSH_COST + 'M dry powder → hold them ' +
                  RESERVE_PUSH_SECS + 's', W-20, 72);
-    ctx.fillStyle = '#6a677f';
-    if (bossKind() !== 'debt') ctx.fillText('stand still in the door to pass', W-20, 90);
-    else { ctx.fillStyle = '#ff6b81'; ctx.fillText('there is no door', W-20, 90); }
+    ctx.fillStyle = '#ff6b81';
+    ctx.fillText('no door. no pass. through him.', W-20, 90);
   } else {
     ctx.fillText('best exit: ' + (G.exits.length ? fmtM(bestExit()) : '—'), W-20, 72);
     ctx.fillText('[X] secondary — sells the MARK at ' + (SECONDARY_RATE*100) + '%', W-20, 90);
@@ -1829,6 +1731,11 @@ function drawExitCard() {
   ctx.fillText('MARKED AT ' + fmtM(mark), W/2, H/2 - 66);
   ctx.fillStyle = '#59d68f'; ctx.font = 'bold 32px monospace';
   ctx.fillText('REALIZED ' + fmtM(got), W/2, H/2 - 26);
+  if (G.signed && G.lastDilute < 0.999) {
+    ctx.fillStyle = '#ffd75e'; ctx.font = 'bold 13px monospace';
+    ctx.fillText('your bids cost you ' + ((1-G.lastDilute)*100).toFixed(0) +
+                 '% of this exit', W/2, H/2 - 92);
+  }
   if (lost > 0.5) {
     ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 14px monospace';
     ctx.fillText('— ' + fmtM(lost) + ' of paper did not convert' +
@@ -1870,6 +1777,43 @@ function renderTitle() {
   ctx.restore();
 }
 
+function renderComplete() {
+  ctx.save();
+  ctx.fillStyle = '#0d0f1a'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+  const [q, tag] = grade();
+  ctx.font = 'bold 40px monospace'; ctx.fillStyle = '#59d68f';
+  ctx.fillText('YOU RETURNED THE FUND', W/2, 110);
+  ctx.font = '15px monospace'; ctx.fillStyle = '#b8b4cc';
+  ctx.fillText('Every round signed. The LPs got actual money. Nobody believes you.', W/2, 142);
+  const tv = tvpiVal(), dp = dpiVal();
+  ctx.font = 'bold 40px monospace';
+  ctx.fillStyle = '#6a677f';
+  ctx.fillText('TVPI ' + tv.toFixed(2) + 'x', W/2 - 180, 210);
+  ctx.fillStyle = dp >= 1 ? '#59d68f' : '#ff6b81';
+  ctx.fillText('DPI ' + dp.toFixed(2) + 'x', W/2 + 180, 210);
+  ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
+  ctx.fillText('(paper)', W/2 - 180, 235);
+  ctx.fillText('(what LPs can eat)', W/2 + 180, 235);
+  ctx.font = '15px monospace'; ctx.fillStyle = '#e8e6f0';
+  ctx.fillText('Best exit: ' + fmtM(bestExit()) + '   Companies burned: ' +
+    (G.maxLives - G.companies) + ' of ' + G.maxLives, W/2, 280);
+  ctx.font = 'bold 34px monospace'; ctx.fillStyle = '#ffd75e';
+  ctx.fillText(q, W/2, 340);
+  ctx.font = '16px monospace'; ctx.fillStyle = '#b8b4cc';
+  ctx.fillText(tag, W/2, 372);
+  ctx.font = '22px monospace';
+  ctx.fillText(storyEmoji() || '\u{1F4ED}', W/2, 412);
+  ctx.font = 'bold 15px monospace';
+  ctx.fillStyle = G.copied ? '#59d68f' : '#9ecbff';
+  ctx.fillText(G.copied ? 'COPIED — go paste it somewhere loud'
+    : '[C] copy your fund card' + (G.daily ? ' for DAILY #' + DAILY_NUM : ''), W/2, 444);
+  ctx.font = 'bold 16px monospace';
+  ctx.fillStyle = Math.sin(performance.now()/200)>0 ? '#ffd75e' : '#6a677f';
+  ctx.fillText('PRESS SPACE — RAISE FUND II', W/2, 480);
+  ctx.restore();
+}
+
 function renderGameOver() {
   ctx.save();
   ctx.fillStyle = '#0d0f1a'; ctx.fillRect(0,0,W,H);
@@ -1877,10 +1821,7 @@ function renderGameOver() {
   const [q, tag] = grade();
   ctx.font = 'bold 22px monospace'; ctx.fillStyle = '#b8b4cc';
   ctx.fillText('FUND I — FINAL', W/2, 90);
-  if (G.dealFatal) {          // the fund did not run out. it was taken.
-    ctx.font = 'bold 20px monospace'; ctx.fillStyle = '#ff6b81';
-    ctx.fillText(G.dealFatal.headline, W/2, 62);
-  }
+
 
   // the reveal: TVPI vs DPI, side by side
   const tv = tvpiVal(), dp = dpiVal();

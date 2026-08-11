@@ -1,7 +1,10 @@
 # Super Carry Bros.
 
-A side-scroller where you run a $100M seed fund. You start with ten portfolio
-companies. Nine of them are supposed to die.
+A side-scroller where you run a $100M seed fund. Ten portfolio companies are
+your lives, worlds are your companies' journeys, and every level ends at a
+round with someone standing in front of the signature. Kill your way through
+both worlds and you have returned the fund. Nine companies are still supposed
+to die on the way.
 
 **[Play it →](https://tmubashir.github.io/super-carry-bros/)**
 
@@ -50,13 +53,17 @@ palm trees, the 101 on the horizon. Two new things live there:
   capital structure.
 
 At the end of it: **the debt holders.** Same fight, worse stakes — every hit
-you land adds debt that sits ahead of you, the clock is a maturity date, there
-is no door, and losing to them does not retire the company. It ends the fund.
+you land adds debt that sits ahead of you, and the clock is a maturity date.
+Beat them, sign the recap, and you have returned the fund. That is the game.
 
 ## The Tier 1 VC
 
-He stands between you and the flag. Three hits and he walks, so you will always
-get to sign. The only question is what you paid for it.
+Every level ends at him — there is no flag until he is out of the deal, and
+there is no door. Three hits and he folds; the flag is behind him. The only
+question is what you paid for it: hits while he is WINDED are free, and any
+other hit is a bid that comes straight out of your exit. Losing the room —
+to his attacks or to the clock — writes the company off and the next one
+retries the level.
 
 He has no health bar. He has a post-money, and it only goes up. Every hit you
 land is a bid — plus $45M, and your ownership falls with it. But every attack
