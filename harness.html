@@ -137,7 +137,14 @@ function levelStep(g, jf, skill){
   }
   const wall = g.solidFull(g.tileAt(Math.floor((b.x+b.w+20)/K.TILE), Math.floor((feet-8)/K.TILE)));
   const gm = g.ents.find(e=>(e.t==='goomba'||e.t==='pivot') && !e.dead && e.x>P.x && e.x-P.x<95 && Math.abs(e.y-feet)<70);
-  if (P.onGround && jf<=0 && (pit||wall||gm)) jf = pit?21 : gm?13 : 16;
+  // anchors: a competent player reads the tell and never walks under a live column
+  const threat = g.ents.find(e=>e.t==='anchor' && e.mode!=='hang' && e.mode!=='retract'
+                             && e.x>P.x-30 && e.x-P.x<110);
+  if (threat){
+    if (Math.abs(threat.x-P.x)<40){ delete keys.right; keys.left=true; }
+    else delete keys.right;
+  }
+  if (P.onGround && jf<=0 && (pit||wall||gm) && !threat) jf = pit?21 : gm?13 : 16;
   // a skilled player also hops to grab high coins — but never over a pit
   if (skill>=2 && P.onGround && jf<=0){
     const coin = g.ents.find(e=>e.t==='coin'&&!e.taken&&e.x>P.x&&e.x-P.x<130&&feet-e.y>40&&feet-e.y<170);
@@ -605,13 +612,20 @@ function probeLoop(){
 
   // content variety: how many distinct level layouts exist?
   const g = boot(9);
-  const layouts = 1;  // LEVEL_ROWS is the only non-boss map
-  add('L3','FAIL','Content variety',
-      `The run is one level layout replayed up to 10 times, plus one boss room seen twice. A player `+
-      `has seen every tile the game owns inside ~40 seconds; everything after that is repetition at `+
-      `identical difficulty. This is the flow channel failing on the boredom side: the challenge is `+
-      `flat while the player's skill climbs.`,
-      {distinctLevels:layouts, replaysPerRun:10, bossRooms:1});
+  // count what the game actually registers, so this probe cannot go quietly stale
+  const layouts = (GAME_SRC.match(/^\s*'[\w-]+':\s*\{\s*rows:/gm) || []).length;
+  const worlds  = (GAME_SRC.match(/\{\s*level:\s*'[\w-]+',\s*boss:/g) || []).length;
+  const varietySev = layouts >= 4 && worlds >= 2 ? 'WARN' : 'FAIL';
+  add('L3', varietySev, 'Content variety',
+      `${layouts} registered layouts across ${worlds} worlds, gated by boss wins — beating a boss `+
+      `changes which level the next company lands in. `+
+      (varietySev === 'WARN'
+        ? `No longer one corridor on repeat, but a world is still one layout replayed until its boss `+
+          `falls, and each new level must add a decision, not just tiles — anchors ask "when do I `+
+          `commit to a column", which is new; the next level needs its own question. WARN until a `+
+          `run's replays differ within a world (mods, escalation, or level rotation).`
+        : `One layout replayed up to 10 times: the flow channel failing on the boredom side.`),
+      {distinctLevels:layouts, worlds, gatedBy:'boss wins'});
 
   // difficulty curve: deaths early vs late in a run
   const deathTimes = [];

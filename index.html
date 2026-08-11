@@ -97,6 +97,44 @@ const BANDS = [
   {name:'FOURTH QUARTILE', best:0,   dpi:0},
 ];
 const RIVALS = ['APEX PARTNERS','MERIDIAN','NORTHGATE','LATTICE','KESTREL CAPITAL'];
+
+// ---------------------------------------------------------------- boss table
+// Both bosses run the same three-hit state machine; this table re-skins and
+// re-prices it. Every string and colour the fight prints comes from here.
+const BOSSES = {
+  tier1: {
+    name: 'TIER 1 VC', pips: 'conviction',
+    gold: '#d4af37', accent: '#16203a', ink: '#cfcbdd',
+    intro: 'TIER 1 VC is standing in front of the signature.',
+    clockLabel: d => d.rival + ' IS CLOSING THIS ROUND',
+    volley: 'OUR PLATFORM TEAM WILL CALL YOU',
+    dash: "WE'RE PRE-EMPTING",
+    pound: "WE'LL LEAD",
+    winded: 'WINDED — FREE HIT',
+    beaten: '"Sorry — I have a board thing."',
+    bidLine: (D) => fmtM(D.val) + ' — and ' + D.rival + ' has to wait.',
+    clockFatal: false,
+    fatal: { headline: 'RUN OVER BY THE ROUND',
+             line: 'they signed it while you were still on the floor.' },
+  },
+  debt: {
+    name: 'DEBT HOLDERS', pips: 'covenants',
+    gold: '#8a8f9c', accent: '#2a2d36', ink: '#b9bcc6',
+    intro: 'THE DEBT HOLDERS ARE ALREADY IN THE ROOM.',
+    clockLabel: () => 'MATURITY IN',
+    volley: 'COVENANT BREACH',
+    dash: 'ACCELERATION CLAUSE',
+    pound: 'FORECLOSURE',
+    winded: 'WAIVER GRANTED — FREE HIT',
+    beaten: '"Fine. We\'ll amend and extend."',
+    bidLine: (D) => fmtM(D.val) + ' of debt — and it sits ahead of you.',
+    clockFatal: true,     // maturity is maturity
+    fatal: { headline: 'DEBT HOLDERS TOOK OVER',
+             line: 'the equity was worth nothing on the way out.' },
+  },
+};
+function bossKind() { return (G && G.mods && G.mods.boss) || 'tier1'; }
+function BOSS() { return BOSSES[bossKind()]; }
 const HOT_DEALS = [
   {name:'GROUNDTRUTH', pitch:'foundation models for HVAC'},
   {name:'PARABOLA',    pitch:'the Stripe for nuclear'},
@@ -152,6 +190,24 @@ const LEVEL_ROWS = [
 "#########################..#############...######....###...################################...######################...#################################################",
 "#########################..#############...######....###...################################...######################...#################################################",
 ];
+// 2-1 Sand Hill Road: the anchor alley. A anchors hang from the sky over the
+// paths you must cross; Z is AI ACCELERATION — immunity to everything except
+// the capital structure. The anchors do not care how fast you were going.
+const LEVEL_ROWS_2 = [
+"....................................................................................................................................................................................",
+"....................................................................................................................................................................................",
+"........................................................................U...........................................................................................................",
+"............................A.........................................Z.....................................A....A..................................................................",
+"....................A...................A...........................=====...................A.............................................M.........................................",
+"................................................................t.t...............A...................................P.................======......................................",
+"...........................t.t................................======................................................=====...........................................................",
+"..........................====................s.........................................m.............t...................................................t...............F.........",
+"............................................=====...................................................=====...............................................=====.......................",
+"............Z...t.t.t...s.s.........t.t.............g.......t.t.t.p.............s.s.t.t.................g.....s.s.s...........t.p...J.......t.t.............g.....t.t.t.............",
+"##############################...#######################...###############....##################...#####################....######################...###############################",
+"##############################...#######################...###############....##################...#####################....######################...###############################",
+];
+
 // The Tier 1 VC arena. Two routes to the HOT DEAL: the ground (through him)
 // or the platforms (around him). Only one of them is cheap.
 // Legend adds: D pass door  X boss spawn  H the hot deal
@@ -169,6 +225,22 @@ const ARENA_ROWS = [
 "##################################",
 "##################################",
 ];
+// The Recap. Same arena, two differences: no door — you cannot walk out of
+// your own cap table — and a wider floor so the dash still wall-slams.
+const ARENA_ROWS_2 = [
+"......................................",
+"......................................",
+"......................................",
+"......................................",
+".................................G....",
+".............=====....=====......G....",
+".................................G....",
+".....====........................G.F..",
+".................................G....",
+"................X................G..H.",
+"######################################",
+"######################################",
+];
 let gateOpen = false;   // the signing window. he is standing in front of it.
 
 // ---------------------------------------------------------------- level registry
@@ -176,11 +248,17 @@ let gateOpen = false;   // the signing window. he is standing in front of it.
 // what it does differently — that is the hook new levels hang off, so adding one
 // is a map plus a mods object rather than a new branch in the update loop.
 const LEVELS = {
-  '1-1': { rows: LEVEL_ROWS, name: 'Demo Day',            mods: {} },
-  'boss': { rows: ARENA_ROWS, name: 'The Hot Deal',        mods: {} },
+  '1-1':   { rows: LEVEL_ROWS,   name: 'Demo Day',       mods: {} },
+  'boss':  { rows: ARENA_ROWS,   name: 'The Hot Deal',   mods: {} },
+  '2-1':   { rows: LEVEL_ROWS_2, name: 'Sand Hill Road', mods: { theme: 'valley' } },
+  'boss2': { rows: ARENA_ROWS_2, name: 'The Recap',      mods: { theme: 'valley', boss: 'debt' } },
 };
-// which levels a normal company can land on, in order of appearance
-const PLAYLIST = ['1-1'];
+// Beating a boss is what advances the world. The fund carousel is unchanged —
+// what changes is which level the next company gets dropped into.
+const WORLDS = [
+  { level: '1-1', boss: 'boss'  },
+  { level: '2-1', boss: 'boss2' },
+];
 
 let MAP = LEVEL_ROWS, MAP_W = LEVEL_ROWS[0].length, MAP_H = LEVEL_ROWS.length;
 function setMap(rows) { MAP = rows; MAP_W = rows[0].length; MAP_H = rows.length; }
@@ -225,11 +303,12 @@ function newRun(runMode) {
     nagIdx: 0, nextNag: SECS_PER_YEAR * 1.5,
     shake: 0,
     mode: 'level',
-    levelId: '1-1', mods: {},
+    levelId: '1-1', mods: {}, world: 0,
     resolved: 0,            // companies that have exited or died
     bossQueue: daily ? [1, 2] : [1, 5],  // hot deals cross the desk early and often
     antiPortfolio: [],      // the ones you didn't get
     pendingHot: null,       // hot deal won, waiting to be played
+    dealFatal: null,        // set when a boss kills you — ends the fund
     hotIdx: 0,
     deal: null,
     story: [],              // one glyph per outcome — this becomes the share card
@@ -252,7 +331,7 @@ function bestExit() { return G.exits.length ? Math.max(...G.exits) : 0; }
 function spawnCompany() {
   G.mode = 'level';
   // the playlist decides which market condition this company gets dropped into
-  loadLevel(PLAYLIST[G.resolved % PLAYLIST.length]);
+  loadLevel(WORLDS[G.world].level);
   const hot = G.pendingHot; G.pendingHot = null;
   G.company = {
     paper: CHECK,           // $10M in at seed
@@ -260,6 +339,7 @@ function spawnCompany() {
     roundCoins: 0,
     proRata: 0,             // seconds of coin doubler left
     fees: 0,                // seconds of 2&20 invincibility
+    accel: 0,               // seconds of AI ACCELERATION left
     hype: 0,                // portion of the mark that is purchased air
     hot: hot ? hot.name : null,
     mult: hot ? hot.mult : 1,   // what your ownership is worth per mark
@@ -275,7 +355,7 @@ function spawnCompany() {
 
 function spawnBoss() {
   G.mode = 'boss';
-  loadLevel('boss');
+  loadLevel(WORLDS[G.world].boss);
   gateOpen = false;
   G.company = null;
   const d = HOT_DEALS[G.hotIdx++ % HOT_DEALS.length];
@@ -355,8 +435,13 @@ const NPC = {
           freeze = 4; G.shake = Math.max(G.shake, 0.15);      // impact you can feel
           burst(e.x, e.y, 12, '#ff8da5', 220);
           C.paper += 1; toast('Restructured the round. +$1M mark.', 1.6);
-        } else if (C.fees > 0) {
+        } else if (C.accel > 0 || C.fees > 0) {
           e.dead = 1; sfx.stomp();          // fees make you invincible to consequences
+          if (C.accel > 0) {                // ...acceleration makes them a speed bump
+            burst(e.x, e.y, 14, '#9ecbff', 240); freeze = 3;
+            G.shake = Math.max(G.shake, 0.12);
+            C.paper += 1; toast('Ran straight through it. +$1M mark.', 1.4);
+          }
         } else return 'down round';
       }
     },
@@ -401,8 +486,14 @@ const NPC = {
           freeze = 4; G.shake = Math.max(G.shake, 0.15);
           burst(e.x, e.y, 12, '#c9a2ff', 220);
           C.paper += 2; toast('Acqui-hired the pivot. +$2M mark.', 1.6);
-        } else if (C.fees > 0) { e.dead = 1; sfx.stomp(); }
-        else return 'pivoted into you';
+        } else if (C.accel > 0 || C.fees > 0) {
+          e.dead = 1; sfx.stomp();
+          if (C.accel > 0) {
+            burst(e.x, e.y, 14, '#9ecbff', 240); freeze = 3;
+            G.shake = Math.max(G.shake, 0.12);
+            C.paper += 1; toast('Ran straight through it. +$1M mark.', 1.4);
+          }
+        } else return 'pivoted into you';
       }
     },
     draw(e) {
@@ -442,6 +533,82 @@ const NPC = {
       ctx.restore();
     },
   },
+
+  anchor: {
+    // The liquidation-preference anchor. It hangs over the path, telegraphs,
+    // and drops. It does not care about your momentum, your markups, or your
+    // AI ACCELERATION — it is the capital structure, not an obstacle.
+    // Fully deterministic: phase comes from the spawn column, never RNG().
+    legend: 'A',
+    spawn: (x, ty) => ({t:'anchor', x, ceilY: ty*TILE + 4, y: ty*TILE + 30,
+      homeY: ty*TILE + 30, vy: 0, mode:'hang',
+      timer: 2.2 - ((Math.floor(x/TILE) * 0.777) % 2.2), w:30, h:34}),
+    update(e, dt) {
+      if (e.mode === 'hang') {
+        if ((e.timer -= dt) <= 0) { e.mode = 'warn'; e.timer = 0.55;
+          blip(140,.12,'square',.05); }               // the tell
+      } else if (e.mode === 'warn') {
+        if ((e.timer -= dt) <= 0) { e.mode = 'fall'; e.vy = 0; }
+      } else if (e.mode === 'fall') {
+        e.vy += 2000 * dt; e.y += e.vy * dt;
+        const ty = Math.floor((e.y + e.h/2) / TILE), tx = Math.floor(e.x / TILE);
+        if (solidTop(tileAt(tx, ty))) {
+          e.y = ty*TILE - e.h/2;
+          e.mode = 'smash'; e.timer = 0.9;
+          G.shake = Math.max(G.shake, 0.25); freeze = 3;
+          burst(e.x, e.y + e.h/2, 14, '#b8b4cc', 200);
+          blip(70,.2,'sawtooth',.07);
+        }
+      } else if (e.mode === 'smash') {
+        if ((e.timer -= dt) <= 0) e.mode = 'retract';
+      } else if (e.mode === 'retract') {
+        e.y -= 260 * dt;
+        if (e.y <= e.homeY) { e.y = e.homeY; e.mode = 'hang'; e.timer = 2.2; }
+      }
+      // lethal only while falling or resting in the crater
+      if (e.mode === 'fall' || e.mode === 'smash') {
+        const b = playerBox();
+        if (rectHit(b.x, b.y, b.w, b.h, e.x - 15, e.y - 17, 30, 34))
+          return { why: 'anchor', override: {
+            headline: 'CRAMMED DOWN',
+            line: "you were crammed down to commons and liquidation preference didn't clear",
+          } };
+      }
+    },
+    draw(e) {
+      // warn: dashed drop-line down the column it will fall through
+      if (e.mode === 'warn') {
+        let gy = H;
+        for (let ty = Math.floor(e.y/TILE); ty < MAP_H; ty++)
+          if (solidTop(tileAt(Math.floor(e.x/TILE), ty))) { gy = ty*TILE; break; }
+        ctx.strokeStyle = 'rgba(255,107,129,0.65)'; ctx.lineWidth = 2;
+        ctx.setLineDash([7, 7]);
+        ctx.beginPath(); ctx.moveTo(e.x, e.y + e.h/2); ctx.lineTo(e.x, gy); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      const shakeX = e.mode === 'warn' ? Math.sin(performance.now()/24) * 2.5 : 0;
+      ctx.save(); ctx.translate(e.x + shakeX, e.y);
+      // chain of links up to the ceiling, shortening as it falls
+      ctx.strokeStyle = '#5a5f6b'; ctx.lineWidth = 3;
+      for (let ly = e.ceilY - e.y; ly < -e.h/2; ly += 9) {
+        ctx.beginPath(); ctx.ellipse(0, ly + 4, 3, 4.5, 0, 0, 7); ctx.stroke();
+      }
+      // a real ship's anchor: ring, stock, shank, curved arms, two flukes
+      ctx.strokeStyle = '#22252c'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(0, -e.h/2 + 3, 4, 0, 7); ctx.stroke();     // ring
+      ctx.fillStyle = '#22252c';
+      ctx.fillRect(-9, -e.h/2 + 7, 18, 3);                               // stock
+      ctx.fillRect(-2, -e.h/2 + 7, 4, e.h - 12);                         // shank
+      ctx.strokeStyle = '#22252c'; ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.arc(0, e.h/2 - 12, 11, Math.PI*0.15, Math.PI*0.85); ctx.stroke();
+      ctx.fillStyle = '#22252c';                                         // flukes
+      ctx.beginPath(); ctx.moveTo(-11, e.h/2 - 8); ctx.lineTo(-17, e.h/2 - 15);
+      ctx.lineTo(-8, e.h/2 - 15); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(11, e.h/2 - 8); ctx.lineTo(17, e.h/2 - 15);
+      ctx.lineTo(8, e.h/2 - 15); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    },
+  },
 };
 
 // entities (coins, enemies, founders, flag)
@@ -456,6 +623,7 @@ function spawnEntities() {
     if (ch === 'B') ents.push({t:'coin', kind:'seat', x, y, r:12, taken:false});
     if (ch === 'P') ents.push({t:'coin', kind:'prorata', x, y, r:11, taken:false});
     if (ch === 'M') ents.push({t:'coin', kind:'fees', x, y, r:11, taken:false});
+    if (ch === 'Z') ents.push({t:'coin', kind:'accel', x, y, r:13, taken:false});
     // enemies come from the NPC table, keyed by their legend character
     for (const type in NPC) if (NPC[type].legend === ch) ents.push(NPC[type].spawn(x, ty));
     if (ch === 'F' && ty === 7) ents.push({t:'flag', x: tx*TILE + TILE/2, y: ty*TILE});
@@ -475,6 +643,7 @@ function spawnEntities() {
 
 // ---------------------------------------------------------------- helpers
 function toast(msg, secs) { G.toast = msg; G.toastT = secs || 2.2; }
+function banner(txt) { G.banner = txt; G.bannerT = 1.4; }
 function fmtM(v) { return '$' + (v>=1000 ? (v/1000).toFixed(1)+'B' : v.toFixed(0)+'M'); }
 function rectHit(ax,ay,aw,ah, bx,by,bw,bh){
   return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
@@ -517,7 +686,8 @@ function update(dt) {
     const wait = state==='dead' ? 2.4 : state==='exit' ? 2.8 : 4.2;
     if (stateTimer > wait || (keys.action && stateTimer > 1.0)) {
       keys.action = false;
-      if (G.companies <= 0 || G.clock <= 0) { endRun(); }
+      // a boss killing you ends the fund. losing the deal never does.
+      if (G.dealFatal || G.companies <= 0 || G.clock <= 0) { endRun(); }
       else nextScene();
     }
     return;
@@ -533,8 +703,10 @@ function update(dt) {
   if (G.clock <= 0) { G.clock = 0; toast('FUND TERM EXPIRED', 2); endRun(); return; }
 
   const C = G.company;
-  if (C) { if (C.proRata > 0) C.proRata -= dt; if (C.fees > 0) C.fees -= dt; }
+  if (C) { if (C.proRata > 0) C.proRata -= dt; if (C.fees > 0) C.fees -= dt;
+           if (C.accel > 0) C.accel -= dt; }
   if (G.toastT > 0) { G.toastT -= dt; if (G.toastT <= 0) G.toast = null; }
+  if (G.bannerT > 0) { G.bannerT -= dt; if (G.bannerT <= 0) G.banner = null; }
   if (G.shake > 0) G.shake -= dt;
 
   // ---- input / physics
@@ -542,7 +714,8 @@ function update(dt) {
   if (keys.left)  { ax -= 1; P.dir = -1; }
   if (keys.right) { ax += 1; P.dir = 1; }
   // ground momentum: accelerate into a run, skid out of it
-  { const tgt = ax * RUN, rate = (ax === 0 ? 5200 : 3000) * dt;
+  { const tgt = ax * RUN * (C && C.accel > 0 ? 1.8 : 1),
+          rate = (ax === 0 ? 5200 : 3000) * dt;
     P.vx += Math.max(-rate, Math.min(rate, tgt - P.vx)); }
 
   // conviction jump: tap = small check, hold = big check, harder landing
@@ -576,7 +749,7 @@ function update(dt) {
 
   // fell off the map
   if (P.y > H + 120) return G.mode === 'boss'
-    ? loseDeal('You fell out of the process.')
+    ? loseDeal('You fell out of the process.', false, true)
     : killCompany('down round → mark to zero');
 
   // ---- the boss owns the rest of the frame
@@ -624,8 +797,10 @@ function update(dt) {
       const b = playerBox();
       if (rectHit(b.x,b.y,b.w,b.h, e.x-e.r, e.y-e.r, e.r*2, e.r*2)) collect(e);
     } else if (NPC[e.t]) {
+      // update returns a kill reason string, or {why, override} for deaths
+      // that carry their own card text
       const why = NPC[e.t].update(e, dt);
-      if (why) return killCompany(why);
+      if (why) return killCompany(why.why || why, why.override);
     } else if (e.t === 'founder') {
       e.pt += dt;
       e.x = e.baseX + Math.sin(e.pt*0.9)*6;
@@ -702,7 +877,10 @@ function updateBoss(dt) {
   const bossRef = ents.find(e => e.t === 'boss');
   D.dis = !!(bossRef && !bossRef.defeated && Math.abs(P.x - bossRef.x) > 300);
   D.t -= dt * (D.dis ? 2.6 : 1);
-  if (D.t <= 0) return loseDeal(D.rival + ' signed it while you were negotiating.');
+  if (D.t <= 0) return loseDeal(
+    BOSS().clockFatal ? 'The note matured. Nobody refinanced you.'
+                      : D.rival + ' signed it while you were negotiating.',
+    false, BOSS().clockFatal);
 
   const pb = playerBox();
 
@@ -746,6 +924,9 @@ function updateBoss(dt) {
         const d = Math.abs(P.x - b.x);
         b.next = d > 380 ? 'volley' : d > 130 ? 'dash' : 'pound';
         b.mode = 'telegraph'; b.timer = 0.5 / sp;
+        // the attack announces itself in the boss's own vocabulary
+        ents.push({t:'float', x: b.x, y: b.y - 150, txt: BOSS()[b.next], life: 0.9,
+                   col: BOSS().gold});
         blip(300,.15,'square',.05);
       }
     } else if (b.mode === 'telegraph') {             // the tell: read it, pick your answer
@@ -758,7 +939,7 @@ function updateBoss(dt) {
       }
     } else if (b.mode === 'dash') {                  // "we're pre-empting"
       b.x += b.vx * dt; b.timer -= dt;
-      const atWall = b.x <= TILE*2.6 || b.x >= TILE*26.9;
+      const atWall = b.x <= TILE*2.6 || b.x >= TILE*(MAP_W - 7.1);   // map-relative, both arenas
       if (atWall) {                                  // baited into the wall: long opening
         b.mode = 'winded'; b.timer = 2.8; b.vx = 0;
         G.shake = 0.32; freeze = 5; blip(80,.3,'sawtooth',.08);
@@ -790,13 +971,13 @@ function updateBoss(dt) {
     } else if (b.mode === 'winded') {                // the opening. hit him here. it's free.
       if ((b.timer -= dt) <= 0) { b.mode = 'idle'; b.timer = 1.2 / sp; }
     }
-    b.x = Math.max(TILE*2.5, Math.min(TILE*27, b.x));
+    b.x = Math.max(TILE*2.5, Math.min(TILE*(MAP_W - 7), b.x));
 
     const BW = 66, BH = 100, bx = b.x - BW/2, by = b.y - BH;
     if (rectHit(pb.x,pb.y,pb.w,pb.h, bx,by,BW,BH)) {
       if (P.vy > 120 && pb.y + pb.h < by + 34) hitBoss(b);
       else if (b.mode === 'dash' && b.stun <= 0)
-        return loseDeal('Run over mid-pre-empt.');
+        return loseDeal('Run over mid-pre-empt.', false, true);
       else if (b.stun <= 0 && b.mode !== 'winded') {
         // strolling contact is a shove, not a death — deaths come from attacks
         P.x = b.x + (P.x < b.x ? -1 : 1) * (BW/2 + 22);
@@ -812,12 +993,12 @@ function updateBoss(dt) {
       e.vy += GRAV*0.55*dt; e.x += e.vx*dt; e.y += e.vy*dt;
       if (e.y > H + 80 || e.x < -60 || e.x > MAP_W*TILE + 60) e.gone = true;
       else if (rectHit(pb.x,pb.y,pb.w,pb.h, e.x-9,e.y-11,18,22))
-        return loseDeal('Pre-empted. Signed before you landed.');
+        return loseDeal(BOSS().volley + '. It landed before you did.', false, true);
     } else if (e.t === 'wave') {
       e.x += e.vx*dt;
       if (e.x < -60 || e.x > MAP_W*TILE + 60) e.gone = true;
       else if (rectHit(pb.x,pb.y,pb.w,pb.h, e.x-16,e.y-22,32,22))
-        return loseDeal('"We can move faster than you."');
+        return loseDeal(BOSS().pound + '. The floor came up.', false, true);
     } else if (e.t === 'float') {
       e.y -= 46*dt; if ((e.life -= dt) <= 0) e.gone = true;
     } else if (e.t === 'flag') {
@@ -849,8 +1030,7 @@ function hitBoss(b) {
     sfx.markup();
     ents.push({t:'float', x: b.x + 58, y: b.y - 104, txt: '+' + fmtM(BID_STEP), life: 1.1});
     ents.push({t:'float', x: b.x + 58, y: b.y - 132, txt: '+' + BID_TIME + 's', life: 1.1, col:'#9ecbff'});
-    toast(BID_BARKS[(D.bids-1) % BID_BARKS.length] + '  ' + fmtM(D.val) +
-          ' — and ' + D.rival + ' has to wait.', 1.8);
+    toast(BID_BARKS[(D.bids-1) % BID_BARKS.length] + '  ' + BOSS().bidLine(D), 1.8);
   }
 
   if (b.hp <= 0) {
@@ -867,16 +1047,22 @@ function winHotDeal() {
     mult: HOT_TARGET / D.val,          // you own less, so you make less
     own:  CHECK / D.val * 100,
   };
+  // beating a boss changes the world under you — the very next company lands
+  // in the next level, carrying the hot deal with it
+  G.world = Math.min(G.world + 1, WORLDS.length - 1);
   sfx.exit();
   state = 'dealwon'; stateTimer = 0;
 }
 
-function loseDeal(reason, passed) {
+// `fatal` = the boss actually killed you. Losing the deal on the clock or
+// walking out still costs nothing today; being run over does not.
+function loseDeal(reason, passed, fatal) {
   const D = G.deal;
-  G.story.push({t: passed ? 'pass' : 'lost'});
+  G.story.push({t: fatal ? 'ko' : passed ? 'pass' : 'lost'});
   G.antiPortfolio.push({ name: D.name, pitch: D.pitch, passed: !!passed,
                          mark: 1400 + RNG()*2600 });
   G.lastDealReason = reason; G.lastDealPassed = !!passed;
+  G.dealFatal = fatal ? (BOSSES[bossKind()].fatal) : null;
   sfx.death();
   state = 'deallost'; stateTimer = 0;
 }
@@ -895,6 +1081,12 @@ function collect(e) {
   if (e.kind === 'fees') {
     e.taken = true; C.fees = 7; sfx.seat();
     toast('2 AND 20 — fees keep you alive regardless of performance.', 2.6); return;
+  }
+  if (e.kind === 'accel') {
+    e.taken = true; C.accel = 9;
+    sfx.markup(); burst(e.x, e.y, 20, '#9ecbff', 260); freeze = 4;
+    banner('AI ACCELERATION');
+    return;
   }
   // term sheets / SAFEs: follow-on pricing — later rounds cost reserves per coin
   const cost = FOLLOWON_COST[Math.min(C.round, FOLLOWON_COST.length-1)];
@@ -924,7 +1116,9 @@ function collect(e) {
   }
 }
 
-function killCompany(why) {
+// `override` = {headline, line} for deaths that have their own thing to say.
+// Without it a death picks a random pass line, which is the normal case.
+function killCompany(why, override) {
   if (G.mode === 'boss') return loseDeal(why);
   const C = G.company;
   G.deadPaper += C.paper;
@@ -932,6 +1126,7 @@ function killCompany(why) {
   G.story.push({t:'dead'});
   G.lastPass = PASS_LINES[(RNG()*PASS_LINES.length)|0];
   G.lastWhy = why;
+  G.deathOverride = override || null;
   sfx.death();
   state = 'dead'; stateTimer = 0;
 }
@@ -955,7 +1150,8 @@ function endRun() { state = 'gameover'; stateTimer = 0; }
 // ---- the share card: the run compressed into one pasteable block ----
 function storyEmoji() {
   return G.story.map(s =>
-    s.t==='dead' ? '💀' : s.t==='sec' ? '🏃' : s.t==='pass' ? '🙅' : s.t==='lost' ? '😤'
+    s.t==='ko' ? '☠️' : s.t==='dead' ? '💀' : s.t==='sec' ? '🏃'
+    : s.t==='pass' ? '🙅' : s.t==='lost' ? '😤'
     : s.m >= 10 ? '🦄' : s.m >= 4 ? '🚀' : '📈').join('');
 }
 function shareText() {
@@ -1009,9 +1205,10 @@ function render(dt) {
 
   if (G.shake > 0) ctx.translate((Math.random()-0.5)*8, (Math.random()-0.5)*8);
 
-  // sky gradient + skyline
+  // sky gradient + skyline — a different time of day per world, not just hues
   const grad = ctx.createLinearGradient(0,0,0,H);
-  grad.addColorStop(0,'#1a2340'); grad.addColorStop(1,'#2b2352');
+  if (theme() === 'valley') { grad.addColorStop(0,'#bcd9ef'); grad.addColorStop(1,'#f0dfbe'); }
+  else                      { grad.addColorStop(0,'#1a2340'); grad.addColorStop(1,'#2b2352'); }
   ctx.fillStyle = grad; ctx.fillRect(0,0,W,H);
   drawSkyline();
 
@@ -1036,17 +1233,20 @@ function render(dt) {
 function drawBossIntro() {
   ctx.fillStyle = 'rgba(13,15,26,0.88)'; ctx.fillRect(0,0,W,H);
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffd75e'; ctx.font = 'bold 32px monospace';
-  ctx.fillText('A HOT DEAL', W/2, H/2 - 78);
+  ctx.fillStyle = bossKind()==='debt' ? '#c0455a' : '#ffd75e'; ctx.font = 'bold 32px monospace';
+  ctx.fillText(bossKind()==='debt' ? 'THE RECAP' : 'A HOT DEAL', W/2, H/2 - 78);
   ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 21px monospace';
   ctx.fillText(G.deal.name + ' — ' + G.deal.pitch, W/2, H/2 - 34);
   ctx.fillStyle = '#b8b4cc'; ctx.font = '15px monospace';
   ctx.fillText(G.deal.rival + ' is closing it. You have ' + DEAL_SECS + ' seconds.', W/2, H/2 + 2);
   ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 17px monospace';
-  ctx.fillText('TIER 1 VC is standing in front of the signature.', W/2, H/2 + 38);
+  ctx.fillText(BOSS().intro, W/2, H/2 + 38);
   ctx.fillStyle = '#6a677f'; ctx.font = '13px monospace';
-  ctx.fillText('Three hits and he walks. Every hit you land is a bid —', W/2, H/2 + 68);
-  ctx.fillText('unless you catch him winded.', W/2, H/2 + 88);
+  ctx.fillText(bossKind()==='debt'
+    ? 'Three hits and they amend. Every hit adds debt ahead of you —'
+    : 'Three hits and he walks. Every hit you land is a bid —', W/2, H/2 + 68);
+  ctx.fillText(bossKind()==='debt' ? 'unless a waiver is on the table.'
+                                   : 'unless you catch him winded.', W/2, H/2 + 88);
 }
 
 function drawDealWon() {
@@ -1069,23 +1269,50 @@ function drawDealWon() {
     : h.bids <= 2 ? 'You paid up a little. It can still work.'
     : h.bids <= 4 ? 'You will need a ' + fmtM(h.val*10) + ' outcome to care about this.'
     : 'Congratulations. You bought a very expensive average company.', W/2, H/2 + 58);
+  // the world changed under you
+  ctx.font = 'bold 15px monospace'; ctx.fillStyle = '#9ecbff';
+  ctx.fillText('NOW ENTERING ' + WORLDS[G.world].level + ' · ' +
+               LEVELS[WORLDS[G.world].level].name.toUpperCase(), W/2, H/2 + 92);
 }
 
 function drawDealLost() {
   const a = G.antiPortfolio[G.antiPortfolio.length-1];
+  const F = G.dealFatal;
   ctx.fillStyle = 'rgba(13,15,26,0.88)'; ctx.fillRect(0,0,W,H);
   ctx.textAlign = 'center';
-  ctx.fillStyle = G.lastDealPassed ? '#b8b4cc' : '#ff6b81';
+  ctx.fillStyle = F ? '#ff6b81' : G.lastDealPassed ? '#b8b4cc' : '#ff6b81';
   ctx.font = 'bold 29px monospace';
-  ctx.fillText(G.lastDealPassed ? 'YOU PASSED' : 'YOU LOST THE DEAL', W/2, H/2 - 52);
+  ctx.fillText(F ? F.headline : G.lastDealPassed ? 'YOU PASSED' : 'YOU LOST THE DEAL',
+               W/2, H/2 - 52);
   ctx.fillStyle = '#e8e6f0'; ctx.font = '16px monospace';
-  ctx.fillText(G.lastDealReason, W/2, H/2 - 14);
+  ctx.fillText(F ? F.line : G.lastDealReason, W/2, H/2 - 14);
   ctx.fillStyle = '#6a677f'; ctx.font = '14px monospace';
-  ctx.fillText(a.name + ' goes to the anti-portfolio.', W/2, H/2 + 22);
-  ctx.fillText('Costs you nothing today.', W/2, H/2 + 46);
+  if (F) {
+    ctx.fillText(G.lastDealReason, W/2, H/2 + 22);
+    ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 18px monospace';
+    ctx.fillText('RUN OVER', W/2, H/2 + 52);
+  } else {
+    ctx.fillText(a.name + ' goes to the anti-portfolio.', W/2, H/2 + 22);
+    ctx.fillText('Costs you nothing today.', W/2, H/2 + 46);
+  }
 }
 
+// which visual theme the current map wants; 1-1 stays exactly as it was
+function theme() { return (G && G.mods && G.mods.theme) || 'night'; }
+// per-theme tile palette. Platforms stay wood-gold in both so the one-way
+// rule keeps reading the same way across worlds.
+const TILE_PAL = {
+  night:  { gTop:'#584d78', gBody:'#3d3554', gSeam:'#332c47',
+            pTop:'#9c8348', pBody:'#6b5a2e', jBase:'#31436b', jCoil:'#9ecbff' },
+  valley: { gTop:'#c9c2b4', gBody:'#a89f8d', gSeam:'#8f8676',
+            pTop:'#9c8348', pBody:'#6b5a2e', jBase:'#5b7ba6', jCoil:'#dff0ff' },
+};
+
 function drawSkyline() {
+  if (theme() === 'valley') return drawSkylineValley();
+  drawSkylineNight();
+}
+function drawSkylineNight() {
   ctx.fillStyle = '#141a30';
   for (let i = 0; i < 22; i++) {
     const x = ((i*137 - cam.x*0.25) % (W+200)) - 100;
@@ -1100,25 +1327,73 @@ function drawSkyline() {
     ctx.fillRect(x, H-90-h, 80, h+30);
   }
 }
+function drawSkylineValley() {
+  // golden-brown hills: two overlapping sine ridges, far parallax
+  for (const [amp, base, col, rate] of [[26, H-190, '#d8c08a', 0.18], [34, H-165, '#c4a869', 0.25]]) {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 8) {
+      const wx = x + cam.x*rate;
+      ctx.lineTo(x, base + Math.sin(wx/140)*amp + Math.sin(wx/57)*amp*0.35);
+    }
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+  }
+  // the 101: a ribbon on the horizon with slow-moving car dots
+  ctx.fillStyle = '#9b9284'; ctx.fillRect(0, H-158, W, 5);
+  ctx.fillStyle = '#f4f2ec';
+  for (let i = 0; i < 9; i++) {
+    const cx = ((i*173 + performance.now()/(i%2 ? 55 : -70)) % (W+40) + (W+40)) % (W+40) - 20;
+    ctx.fillRect(cx, H-157, 5, 3);
+  }
+  // low glass office parks, nothing taller than four floors
+  for (let i = 0; i < 9; i++) {
+    const x = ((i*231 - cam.x*0.25) % (W+300)) - 150;
+    const floors = 2 + (i*53)%3, bw = 90 + (i*37)%50, bh = floors*18;
+    ctx.fillStyle = '#e7e3d6'; ctx.fillRect(x, H-120-bh, bw, bh+20);
+    ctx.fillStyle = '#8fb7d9';
+    for (let f = 0; f < floors; f++) for (let wx = 6; wx < bw-10; wx += 16)
+      ctx.fillRect(x+wx, H-112-bh+f*18, 10, 9);
+  }
+  // palm trees on the nearer layer: trunk plus five fronds
+  for (let i = 0; i < 7; i++) {
+    const x = ((i*307 - cam.x*0.5) % (W+300)) - 150, ty = H-96;
+    ctx.strokeStyle = '#8a6d43'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(x, ty); ctx.quadraticCurveTo(x+6, ty-30, x+2, ty-52); ctx.stroke();
+    ctx.strokeStyle = '#5e7d43'; ctx.lineWidth = 3;
+    for (let f = 0; f < 5; f++) {
+      const a = -Math.PI/2 - 0.9 + f*0.45;
+      ctx.beginPath(); ctx.moveTo(x+2, ty-52);
+      ctx.quadraticCurveTo(x+2+Math.cos(a)*22, ty-52+Math.sin(a)*22-6,
+                           x+2+Math.cos(a)*34, ty-52+Math.sin(a)*34+8);
+      ctx.stroke();
+    }
+  }
+  // the monument sign
+  const sx = ((520 - cam.x*0.5) % (W+300)) - 150;
+  ctx.fillStyle = '#7a6a4f'; ctx.fillRect(sx, H-118, 8, 28);
+  ctx.fillStyle = '#b3a284'; ctx.fillRect(sx-34, H-140, 76, 24);
+  ctx.fillStyle = '#463a28'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
+  ctx.fillText('SAND HILL RD', sx+4, H-124);
+}
 
 function drawTiles() {
+  const pal = TILE_PAL[theme()];
   const tx0 = Math.floor(cam.x/TILE), tx1 = Math.ceil((cam.x+W)/TILE);
   for (let ty = 0; ty < MAP_H; ty++) for (let tx = tx0; tx <= tx1; tx++) {
     const ch = tileAt(tx,ty), x = tx*TILE, y = ty*TILE;
     if (ch === '#') {
-      ctx.fillStyle = '#3d3554'; ctx.fillRect(x,y,TILE,TILE);
-      ctx.fillStyle = '#584d78'; ctx.fillRect(x,y,TILE,5);
-      ctx.fillStyle = '#332c47'; ctx.fillRect(x+2,y+9,TILE-4,2);
+      ctx.fillStyle = pal.gBody; ctx.fillRect(x,y,TILE,TILE);
+      ctx.fillStyle = pal.gTop;  ctx.fillRect(x,y,TILE,5);
+      ctx.fillStyle = pal.gSeam; ctx.fillRect(x+2,y+9,TILE-4,2);
     } else if (ch === '=') {
-      ctx.fillStyle = '#6b5a2e'; ctx.fillRect(x,y+4,TILE,14);
-      ctx.fillStyle = '#9c8348'; ctx.fillRect(x,y+4,TILE,4);
+      ctx.fillStyle = pal.pBody; ctx.fillRect(x,y+4,TILE,14);
+      ctx.fillStyle = pal.pTop;  ctx.fillRect(x,y+4,TILE,4);
     } else if (ch === 'J') {
-      ctx.fillStyle = '#31436b'; ctx.fillRect(x+3, y+24, TILE-6, 12);      // base
-      ctx.strokeStyle = '#9ecbff'; ctx.lineWidth = 2;                     // coil
+      ctx.fillStyle = pal.jBase; ctx.fillRect(x+3, y+24, TILE-6, 12);     // base
+      ctx.strokeStyle = pal.jCoil; ctx.lineWidth = 2;                    // coil
       ctx.beginPath();
       for (let i=0;i<4;i++){ ctx.moveTo(x+6, y+22-i*5); ctx.lineTo(x+TILE-6, y+19-i*5); }
       ctx.stroke();
-      ctx.fillStyle = '#9ecbff'; ctx.fillRect(x+3, y+2, TILE-6, 4);       // pad
+      ctx.fillStyle = pal.jCoil; ctx.fillRect(x+3, y+2, TILE-6, 4);      // pad
     } else if (ch === 'G' && !gateOpen) {
       ctx.fillStyle = '#2a2136'; ctx.fillRect(x,y,TILE,TILE);
       ctx.fillStyle = '#4a3a5e'; ctx.fillRect(x+3,y+3,TILE-6,TILE-6);
@@ -1168,6 +1443,19 @@ function drawEnts() {
         ctx.fillStyle = '#1a2340'; ctx.font='bold 8px monospace'; ctx.textAlign='center';
         ctx.fillText('2/20', 0, -5);
         ctx.restore();
+      } else if (e.kind === 'accel') {
+        // a GPU with a lightning bolt — the transformation power-up
+        const g2 = 0.5 + 0.5*Math.sin(t*5 + e.x);
+        ctx.save(); ctx.translate(e.x, e.y+bob);
+        ctx.fillStyle = 'rgba(158,203,255,' + (0.12 + g2*0.18).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(0, 0, 20 + g2*5, 0, 7); ctx.fill();
+        ctx.fillStyle = '#1d2b3f'; ctx.fillRect(-12,-9,24,18);
+        ctx.fillStyle = '#9ecbff';
+        for (let i=0;i<4;i++){ ctx.fillRect(-11+i*6,-13,3,4); ctx.fillRect(-11+i*6,9,3,4); }
+        ctx.fillStyle = '#ffd75e'; ctx.beginPath();
+        ctx.moveTo(2,-7); ctx.lineTo(-4,1); ctx.lineTo(0,1); ctx.lineTo(-2,7);
+        ctx.lineTo(5,-2); ctx.lineTo(1,-2); ctx.closePath(); ctx.fill();
+        ctx.restore();
       }
     } else if (NPC[e.t]) {
       NPC[e.t].draw(e);
@@ -1207,31 +1495,64 @@ function drawEnts() {
           ctx.moveTo(-e.face*(30+i*22), -80+i*18); ctx.lineTo(-e.face*(64+i*22), -80+i*18); ctx.stroke(); }
       }
       ctx.save(); ctx.scale(e.face, 1);
-      // the shell: a stack of everyone else's term sheets
-      ctx.fillStyle = '#cfcbdd';
-      for (let i=0;i<5;i++) ctx.fillRect(-50, -82 + i*14, 26, 12);
-      ctx.fillStyle = '#8a86a3';
-      for (let i=0;i<5;i++) ctx.fillRect(-46, -78 + i*14, 18, 2);
+      if (bossKind() === 'debt') {
+        // the shell: a stack of loan documents, edges ruled like a ledger
+        ctx.fillStyle = '#d9dbe1';
+        for (let i=0;i<5;i++) ctx.fillRect(-50, -82 + i*14, 26, 12);
+        ctx.fillStyle = '#c0455a';
+        for (let i=0;i<5;i++) ctx.fillRect(-46, -78 + i*14, 18, 2);
+      } else {
+        // the shell: a stack of everyone else's term sheets
+        ctx.fillStyle = '#cfcbdd';
+        for (let i=0;i<5;i++) ctx.fillRect(-50, -82 + i*14, 26, 12);
+        ctx.fillStyle = '#8a86a3';
+        for (let i=0;i<5;i++) ctx.fillRect(-46, -78 + i*14, 18, 2);
+      }
       ctx.restore();
-      ctx.fillStyle = '#20263a'; ctx.fillRect(-26,-30,20,30); ctx.fillRect(6,-30,20,30);
-      ctx.fillStyle = '#f0ede4'; ctx.fillRect(-28,-7,22,7); ctx.fillRect(4,-7,22,7);
-      ctx.fillStyle = hit ? '#8ea3c9' : '#141d33'; ctx.fillRect(-30,-78,60,50);  // the vest, enormous
-      ctx.fillStyle = '#6f87b8'; ctx.fillRect(-32,-86,64,9);                     // popped collar
-      ctx.fillStyle = '#243357'; ctx.fillRect(-3,-78,6,50);
-      ctx.fillStyle = '#6f87b8'; ctx.fillRect(-40,-76,10,34); ctx.fillRect(30,-76,10,34);
-      ctx.fillStyle = '#d4af37'; ctx.beginPath(); ctx.arc(0,-58,11,0,7); ctx.fill();
-      ctx.fillStyle = '#141d33'; ctx.beginPath();
-      ctx.moveTo(0,-65); ctx.lineTo(6,-58); ctx.lineTo(0,-51); ctx.lineTo(-6,-58);
-      ctx.closePath(); ctx.fill();
-      ctx.fillStyle = '#dbb894'; ctx.fillRect(-13,-110,26,24);
-      ctx.fillStyle = '#b8b4cc'; ctx.fillRect(-15,-114,30,7);                    // silver hair
-      ctx.fillStyle = '#0d0f1a'; ctx.fillRect(-11,-103,22,5);                    // glasses
+      if (bossKind() === 'debt') {
+        const stampFlash = e.mode === 'telegraph' && Math.floor(performance.now()/80)%2;
+        ctx.fillStyle = '#2a2d36'; ctx.fillRect(-26,-30,20,30); ctx.fillRect(6,-30,20,30);
+        ctx.fillStyle = '#101216'; ctx.fillRect(-28,-7,22,7); ctx.fillRect(4,-7,22,7); // oxfords
+        ctx.fillStyle = hit ? '#a7abb6' : '#585d68'; ctx.fillRect(-30,-78,60,50);  // grey suit
+        ctx.fillStyle = '#8a8f9c'; ctx.fillRect(-32,-86,64,9);                     // flat collar
+        ctx.fillStyle = '#3a3e48'; ctx.fillRect(-3,-78,6,50);
+        ctx.fillStyle = '#8a8f9c'; ctx.fillRect(-40,-76,10,34);
+        ctx.fillStyle = '#4a3722'; ctx.fillRect(28,-64,16,26);                     // briefcase
+        ctx.fillStyle = '#2c210f'; ctx.fillRect(33,-68,6,5);
+        ctx.fillStyle = '#d9dbe1'; ctx.fillRect(-46,-58,14,20);                    // ledger under arm
+        ctx.fillStyle = '#c0455a'; ctx.fillRect(-44,-54,10,2); ctx.fillRect(-44,-49,10,2);
+        // the 1x PREF stamp, flashing on the telegraph
+        ctx.save(); ctx.translate(0,-56); ctx.rotate(-0.18);
+        ctx.strokeStyle = stampFlash ? '#ff6b81' : '#c0455a'; ctx.lineWidth = 3;
+        ctx.strokeRect(-22,-9,44,18);
+        ctx.fillStyle = stampFlash ? '#ff6b81' : '#c0455a';
+        ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
+        ctx.fillText('1x PREF', 0, 4);
+        ctx.restore();
+        ctx.fillStyle = '#cfb693'; ctx.fillRect(-13,-110,26,24);                   // head
+        ctx.fillStyle = '#6a6f7a'; ctx.fillRect(-15,-114,30,7);                    // grey hair
+        ctx.fillStyle = '#0d0f1a'; ctx.fillRect(-11,-103,22,5);                    // glasses
+      } else {
+        ctx.fillStyle = '#20263a'; ctx.fillRect(-26,-30,20,30); ctx.fillRect(6,-30,20,30);
+        ctx.fillStyle = '#f0ede4'; ctx.fillRect(-28,-7,22,7); ctx.fillRect(4,-7,22,7);
+        ctx.fillStyle = hit ? '#8ea3c9' : '#141d33'; ctx.fillRect(-30,-78,60,50);  // the vest, enormous
+        ctx.fillStyle = '#6f87b8'; ctx.fillRect(-32,-86,64,9);                     // popped collar
+        ctx.fillStyle = '#243357'; ctx.fillRect(-3,-78,6,50);
+        ctx.fillStyle = '#6f87b8'; ctx.fillRect(-40,-76,10,34); ctx.fillRect(30,-76,10,34);
+        ctx.fillStyle = '#d4af37'; ctx.beginPath(); ctx.arc(0,-58,11,0,7); ctx.fill();
+        ctx.fillStyle = '#141d33'; ctx.beginPath();
+        ctx.moveTo(0,-65); ctx.lineTo(6,-58); ctx.lineTo(0,-51); ctx.lineTo(-6,-58);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#dbb894'; ctx.fillRect(-13,-110,26,24);
+        ctx.fillStyle = '#b8b4cc'; ctx.fillRect(-15,-114,30,7);                    // silver hair
+        ctx.fillStyle = '#0d0f1a'; ctx.fillRect(-11,-103,22,5);                    // glasses
+      }
       ctx.restore();
       ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center';
       if (e.defeated) { ctx.fillStyle = '#b8b4cc';
-        ctx.fillText('"Sorry — I have a board thing."', e.x, e.y - 126); }
-      else if (e.mode === 'winded') { ctx.fillStyle = '#59d68f'; ctx.fillText('WINDED — FREE HIT', e.x, e.y - 126); }
-      else { ctx.fillStyle = '#d4af37'; ctx.fillText('TIER 1 VC · conviction ' + '●'.repeat(Math.max(0,e.hp)), e.x, e.y - 126); }
+        ctx.fillText(BOSS().beaten, e.x, e.y - 126); }
+      else if (e.mode === 'winded') { ctx.fillStyle = '#59d68f'; ctx.fillText(BOSS().winded, e.x, e.y - 126); }
+      else { ctx.fillStyle = BOSS().gold; ctx.fillText(BOSS().name + ' · ' + BOSS().pips + ' ' + '●'.repeat(Math.max(0,e.hp)), e.x, e.y - 126); }
     } else if (e.t === 'proj' && !e.gone) {
       ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(performance.now()/90);
       ctx.fillStyle = '#ffd75e'; ctx.fillRect(-8,-11,16,22);
@@ -1287,6 +1608,18 @@ function drawEnts() {
 
 function drawPlayer() {
   const s = P.scale;
+  // AI ACCELERATION: three fading afterimages trailing the sprite
+  if (G.company && G.company.accel > 0) {
+    for (let i = 3; i >= 1; i--) {
+      ctx.save();
+      ctx.globalAlpha = 0.10 * i;
+      ctx.translate(P.x - P.dir * (P.vx !== 0 ? i * 11 : 0), P.y);
+      ctx.scale(P.dir * s, s);
+      ctx.fillStyle = '#9ecbff';
+      ctx.fillRect(-9, -36, 18, 36);
+      ctx.restore();
+    }
+  }
   ctx.save();
   ctx.translate(P.x, P.y);
   ctx.scale(P.dir * s, s);
@@ -1322,6 +1655,29 @@ function drawHUD() {
   ctx.font = '13px monospace';
   ctx.fillStyle = dp > 0 ? '#9ecbff' : '#6a677f';
   ctx.fillText('DPI ' + dp.toFixed(2) + 'x' + (dp === 0 ? '  (this is the real one)' : ''), 22, 64);
+
+  // AI ACCELERATION pill with a draining bar
+  if (C && C.accel > 0) {
+    ctx.fillStyle = 'rgba(29,43,63,0.9)'; ctx.fillRect(W/2-110, 30, 220, 30);
+    ctx.strokeStyle = '#9ecbff'; ctx.lineWidth = 2; ctx.strokeRect(W/2-110, 30, 220, 30);
+    ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#9ecbff'; ctx.textAlign = 'center';
+    ctx.fillText('AI ACCELERATION', W/2, 45);
+    ctx.fillStyle = '#2b2840'; ctx.fillRect(W/2-100, 50, 200, 5);
+    ctx.fillStyle = '#9ecbff'; ctx.fillRect(W/2-100, 50, 200 * Math.min(1, C.accel/9), 5);
+    ctx.textAlign = 'left';
+  }
+  // the pickup moment: huge, centre-screen, scaling in
+  if (G.banner && G.bannerT > 0) {
+    const k = Math.min(1, (1.4 - G.bannerT) / 0.18);
+    ctx.save();
+    ctx.translate(W/2, H*0.36);
+    ctx.scale(0.4 + 0.6*k, 0.4 + 0.6*k);
+    ctx.globalAlpha = Math.min(1, G.bannerT / 0.35);
+    ctx.font = 'bold 40px monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd75e'; ctx.fillText(G.banner, 0, 0);
+    ctx.restore();
+    ctx.textAlign = 'left';
+  }
 
   // portfolio dots
   ctx.font = '12px monospace'; ctx.fillStyle = '#b8b4cc';
@@ -1375,7 +1731,8 @@ function drawHUD() {
     ctx.fillText('[X] burn $' + RESERVE_PUSH_COST + 'M dry powder → hold them ' +
                  RESERVE_PUSH_SECS + 's', W-20, 72);
     ctx.fillStyle = '#6a677f';
-    ctx.fillText('stand still in the door to pass', W-20, 90);
+    if (bossKind() !== 'debt') ctx.fillText('stand still in the door to pass', W-20, 90);
+    else { ctx.fillStyle = '#ff6b81'; ctx.fillText('there is no door', W-20, 90); }
   } else {
     ctx.fillText('best exit: ' + (G.exits.length ? fmtM(bestExit()) : '—'), W-20, 72);
     ctx.fillText('[X] secondary — sells the MARK at ' + (SECONDARY_RATE*100) + '%', W-20, 90);
@@ -1401,23 +1758,25 @@ function drawHUD() {
     const D = G.deal;
     ctx.textAlign = 'center';
     ctx.font = 'bold 12px monospace'; ctx.fillStyle = '#b8b4cc';
-    ctx.fillText('THE HOT DEAL', W/2, 106);
+    ctx.fillText(bossKind()==='debt' ? 'THE RECAP' : 'THE HOT DEAL', W/2, 106);
     const frac = Math.min(1, (D.val - HOT_ENTRY) / (420 - HOT_ENTRY));
     ctx.fillStyle = '#2b2840'; ctx.fillRect(W/2-170, 114, 340, 13);
-    ctx.fillStyle = D.val > 240 ? '#ff6b81' : '#d4af37';
+    ctx.fillStyle = D.val > 240 ? '#ff6b81' : BOSS().gold;
     ctx.fillRect(W/2-170, 114, 340*frac, 13);
     ctx.strokeStyle = '#584d78'; ctx.lineWidth = 1; ctx.strokeRect(W/2-170, 114, 340, 13);
     ctx.font = 'bold 17px monospace'; ctx.fillStyle = '#ffd75e';
-    ctx.fillText('POST-MONEY ' + fmtM(D.val), W/2, 146);
+    ctx.fillText((bossKind()==='debt' ? 'DEBT AHEAD OF YOU ' : 'POST-MONEY ') + fmtM(D.val), W/2, 146);
     ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
-    ctx.fillText('your $10M buys ' + (CHECK/D.val*100).toFixed(1) + '%', W/2, 162);
+    ctx.fillText(bossKind()==='debt'
+      ? 'it all pays out before your ' + (CHECK/D.val*100).toFixed(1) + '%'
+      : 'your $10M buys ' + (CHECK/D.val*100).toFixed(1) + '%', W/2, 162);
 
     // the rival closing the round: the thing your money actually buys off
     const rf = Math.max(0, Math.min(1, D.t / D.t0));
     const urgent = D.t < 7;
     ctx.font = 'bold 11px monospace';
     ctx.fillStyle = D.dis ? '#ff6b81' : urgent ? '#ff6b81' : '#b8b4cc';
-    ctx.fillText(D.rival + ' IS CLOSING THIS ROUND — ' + Math.ceil(D.t) + 's' +
+    ctx.fillText(BOSS().clockLabel(D) + ' — ' + Math.ceil(D.t) + 's' +
                  (D.dis ? '   ⚠ YOU LOOK DISINTERESTED (2.6x)' : ''), W/2, 186);
     ctx.fillStyle = '#2b2840'; ctx.fillRect(W/2-170, 192, 340, 9);
     ctx.fillStyle = (urgent || D.dis) ? '#ff6b81' : '#9ecbff';
@@ -1427,7 +1786,7 @@ function drawHUD() {
     const bs = ents.find(e => e.t === 'boss');
     const hp = bs ? Math.max(0, bs.hp) : 0;
     ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
-    ctx.fillText('HIS CONVICTION', W/2 - 46, 180);
+    ctx.fillText(bossKind()==='debt' ? 'THEIR COVENANTS' : 'HIS CONVICTION', W/2 - 46, 180);
     for (let i = 0; i < 3; i++) {
       ctx.fillStyle = i < hp ? '#ff6b81' : '#39304a';
       ctx.beginPath(); ctx.arc(W/2 + 22 + i*16, 176, 5, 0, 7); ctx.fill();
@@ -1446,12 +1805,14 @@ function drawHUD() {
 }
 
 function drawDeathCard() {
+  const O = G.deathOverride;
   ctx.fillStyle = 'rgba(13,15,26,0.82)'; ctx.fillRect(0,0,W,H);
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 26px monospace';
-  ctx.fillText('COMPANY #' + G.companyIdx + ' — MARKED TO ZERO', W/2, H/2 - 40);
+  ctx.fillStyle = O ? '#ff6b81' : '#e8e6f0'; ctx.font = 'bold 26px monospace';
+  ctx.fillText(O ? O.headline : 'COMPANY #' + G.companyIdx + ' — MARKED TO ZERO',
+               W/2, H/2 - 40);
   ctx.font = '17px monospace'; ctx.fillStyle = '#b8b4cc';
-  ctx.fillText(G.lastPass, W/2, H/2 + 4);
+  ctx.fillText(O ? O.line : G.lastPass, W/2, H/2 + 4);
   ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
   ctx.fillText('This is fine. Nine of them are supposed to die.', W/2, H/2 + 36);
   ctx.fillText(G.companies + ' companies remaining', W/2, H/2 + 58);
@@ -1516,6 +1877,10 @@ function renderGameOver() {
   const [q, tag] = grade();
   ctx.font = 'bold 22px monospace'; ctx.fillStyle = '#b8b4cc';
   ctx.fillText('FUND I — FINAL', W/2, 90);
+  if (G.dealFatal) {          // the fund did not run out. it was taken.
+    ctx.font = 'bold 20px monospace'; ctx.fillStyle = '#ff6b81';
+    ctx.fillText(G.dealFatal.headline, W/2, 62);
+  }
 
   // the reveal: TVPI vs DPI, side by side
   const tv = tvpiVal(), dp = dpiVal();

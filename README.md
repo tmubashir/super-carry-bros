@@ -36,6 +36,23 @@ that would have made it real.
 Once a mark is mostly air, selling it to someone else at half price beats
 holding it. That is not a bug.
 
+## World 2: Sand Hill Road
+
+Beat the Tier 1 VC and the world changes under you — daytime, golden hills,
+palm trees, the 101 on the horizon. Two new things live there:
+
+- **Anchors.** Liquidation preference hangs from the sky on chains. It
+  telegraphs, it drops, and it does not care about your momentum or your
+  markups. Getting hit reads you the sentence it exists for.
+- **AI ACCELERATION.** A pickup that makes you faster and lets you run
+  straight through founders' problems for nine seconds. It does nothing
+  about the anchors, because it is immunity to competition, not to the
+  capital structure.
+
+At the end of it: **the debt holders.** Same fight, worse stakes — every hit
+you land adds debt that sits ahead of you, the clock is a maturity date, there
+is no door, and losing to them does not retire the company. It ends the fund.
+
 ## The Tier 1 VC
 
 He stands between you and the flag. Three hits and he walks, so you will always
