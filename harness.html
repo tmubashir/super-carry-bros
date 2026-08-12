@@ -76,11 +76,11 @@ const EXPORTS = `;return{
   get MAP(){return MAP}, get MAP_W(){return MAP_W}, get MAP_H(){return MAP_H},
   get gateOpen(){return gateOpen},
   P, cam, update, render, newRun, spawnBoss, spawnCompany, spawnEntities, signRound,
-  grade, tvpiVal, dpiVal, bestExit, deployed, playerBox, tileAt, solidTop, solidFull,
+  grade, tvpiVal, addTvpi, playerBox, tileAt, solidTop, solidFull,
   collect, killCompany, hitBoss, rectHit,
-  K:{TILE,GRAV,RUN,JUMP_MIN,JUMP_HOLD,HOLD_MAX,FUND_YEARS,SECS_PER_YEAR,CHECK,FUND_SIZE,
-     START_RESERVES,ROUND_SIZE,DILUTE,FOLLOWON_COST,HOT_ENTRY,BID_STEP,HOT_TARGET,DEAL_SECS,
-     LEVEL_ROWS,ARENA_ROWS,ROUND_NAMES}
+  K:{TILE,GRAV,RUN,JUMP_MIN,JUMP_HOLD,HOLD_MAX,LIVES,
+     TVPI_START,TVPI_SAFE,TVPI_TERM,TVPI_UNCAP,TVPI_STOMP,TVPI_BOSS,
+     DOWN_ROUND,INVULN_SECS,LEVEL_ROWS,ARENA_ROWS,BANDS}
 }`;
 function boot(seed, src){
   const doc = {getElementById:()=>({getContext:()=>stubCtx(),width:960,height:540})};
@@ -107,15 +107,13 @@ function checkInvariants(g, tag, bag){
     if (!Number.isFinite(v)) bad('non-finite player.'+k, v);
   if (!INV.includes(g.state)) bad('unknown state', g.state);
   if (G) {
-    if (!Number.isFinite(G.reserves)) bad('non-finite reserves', G.reserves);
-    if (G.reserves < 0) bad('negative reserves', G.reserves);
-    if (G.companies < 0) bad('negative companies', G.companies);
-    if (G.company && !Number.isFinite(G.company.paper)) bad('non-finite paper', G.company.paper);
-    if (G.company && G.company.paper < 0) bad('negative paper', G.company.paper);
-    if (G.deal && !Number.isFinite(G.deal.val)) bad('non-finite valuation', G.deal.val);
-    if (G.exits.some(e=>!Number.isFinite(e))) bad('non-finite exit', G.exits.join());
-    if (!Number.isFinite(g.tvpiVal())) bad('non-finite TVPI', g.tvpiVal());
-    if (!Number.isFinite(g.dpiVal())) bad('non-finite DPI', g.dpiVal());
+    if (!Number.isFinite(G.tvpi)) bad('non-finite TVPI', G.tvpi);
+    if (G.tvpi < 0) bad('negative TVPI', G.tvpi);
+    if (G.companies < 0) bad('negative lives', G.companies);
+    if (G.companies > G.maxLives + 20) bad('life count runaway', G.companies);
+    if (G.deal && !Number.isFinite(G.deal.hp)) bad('non-finite boss hp', G.deal.hp);
+    for (const k of ['proRata','fees','accel','invuln'])
+      if (!Number.isFinite(G[k])) bad('non-finite timer '+k, G[k]);
   }
   // player embedded in a wall (feet-1px, chest height)
   if (g.state==='play'){
@@ -137,78 +135,42 @@ function levelStep(g, jf, skill){
     if(!g.solidTop(g.tileAt(tx,ty)) && !g.solidTop(g.tileAt(tx,ty+1))){pit=d;break;}
   }
   const wall = g.solidFull(g.tileAt(Math.floor((b.x+b.w+20)/K.TILE), Math.floor((feet-8)/K.TILE)));
-  const gm = g.ents.find(e=>(e.t==='goomba'||e.t==='pivot') && !e.dead && e.x>P.x && e.x-P.x<95 && Math.abs(e.y-feet)<70);
-  // anchors: a competent player reads the tell and never walks under a live column
-  const threat = g.ents.find(e=>e.t==='anchor' && e.mode!=='hang' && e.mode!=='retract'
-                             && e.x>P.x-30 && e.x-P.x<110);
+  const en = g.ents.find(e=>(e.t==='goomba'||e.t==='pivot') && !e.dead &&
+             e.x>P.x && e.x-P.x<95 && Math.abs(e.y-feet)<70);
+  // skill 1+: read the anchor tells and never stand under a live column
+  const threat = skill >= 1 && g.ents.find(e=>e.t==='anchor' && e.mode!=='hang' &&
+                   e.mode!=='retract' && e.x>P.x-30 && e.x-P.x<110);
   if (threat){
     if (Math.abs(threat.x-P.x)<40){ delete keys.right; keys.left=true; }
     else delete keys.right;
   }
-  if (P.onGround && jf<=0 && (pit||wall||gm) && !threat) jf = pit?21 : gm?13 : 16;
-  // a skilled player also hops to grab high coins — but never over a pit
-  if (skill>=2 && P.onGround && jf<=0){
-    const coin = g.ents.find(e=>e.t==='coin'&&!e.taken&&e.x>P.x&&e.x-P.x<130&&feet-e.y>40&&feet-e.y<170);
-    const landSafe = coin && g.solidTop(g.tileAt(Math.floor(coin.x/K.TILE), Math.floor((feet+6)/K.TILE)));
-    if (coin && landSafe) jf = 20;
+  // skill 2: stomping is the verb and it pays, so go out of your way to land on things
+  const stompable = skill >= 2 && en && en.x-P.x > 30 && en.x-P.x < 72;
+  if (P.onGround && jf<=0 && !threat){
+    if (stompable) jf = 12;                       // arc onto its head
+    else if (pit || wall) jf = pit?21:16;
+    else if (en && skill >= 1) jf = 13;           // skill 0 just walks into it
   }
   return {keys, jf};
 }
-// lag: frames of reaction delay. A perfect bot dodges everything, which makes the
-// patient line look free; a human sees the tell late. Threading a delay through the
-// bot's VIEW of the boss (not its motor skill) is the honest way to price patience.
-function bossStep(g, jf, plan, lag){
-  const {P,K} = g; const keys = {};
-  let b = g.ents.find(e=>e.t==='boss');
-  if (b && lag) {
-    g._hist = g._hist || [];
-    g._hist.push({mode:b.mode, x:b.x, timer:b.timer});
-    if (g._hist.length > lag) {
-      const old = g._hist.shift();
-      b = Object.create(b);            // delayed view; real entity untouched
-      b.mode = old.mode; b.x = old.x; b.timer = old.timer;
-    }
-  }
-  const PERCH_X = 5*K.TILE, PERCH_Y = 7*K.TILE;   // r7 platform, above shockwave height
+// The boss bot: stomp his head, dodge the dash, then walk to the signature.
+function bossStep(g, jf){
+  const {P} = g; const keys = {};
+  const b = g.ents.find(e=>e.t==='boss');
   if (b && !b.defeated){
     const d = b.x-P.x, ad = Math.abs(d);
-    const open = b.mode==='winded';
-    if (plan==='bid'){                              // jump on him on sight
-      if(ad>46) keys[d>0?'right':'left']=true;
-      if(ad<150 && P.onGround && jf<=0) jf=11;
-    } else if (plan==='platform'){
-      if (open){                                    // opening: drop off and rush him
-        if(ad>46) keys[d>0?'right':'left']=true;
-        if(ad<150 && P.onGround && jf<=0) jf=11;
-      } else {                                      // otherwise sit on the high ground
-        const dx = PERCH_X - P.x;
-        if (Math.abs(dx) > 14) keys[dx>0?'right':'left']=true;
-        if (P.onGround && P.y > PERCH_Y + 4 && jf<=0) jf=20;   // climb up
-      }
-    } else if (plan==='engaged'){
-      // patience played properly: hold mid-range so you never read as disinterested,
-      // dodge the tells, and punish the opening. Costs execution, not distance.
-      if (open){ if(ad>46) keys[d>0?'right':'left']=true;
-                 if(ad<150 && P.onGround && jf<=0) jf=11; }
-      else if (b.mode==='dash'){ keys[d>0?'left':'right']=true;      // clear the lane
-                                 if(P.onGround && jf<=0) jf=10; }
-      else if (ad<130) keys[d>0?'left':'right']=true;                // don't get walked over
-      else if (ad>240) keys[d>0?'right':'left']=true;                // but never stand off
-    } else {                                        // 'wait' — stand off and let him come
-      if (open){ if(ad>46) keys[d>0?'right':'left']=true;
-                 if(ad<150 && P.onGround && jf<=0) jf=11; }
-      else if (ad<250) keys[d>0?'left':'right']=true;
-      else if (ad>430) keys[d>0?'right':'left']=true;
-    }
-  } else keys.right = true;
-  const airborneSafe = plan==='platform' && P.y <= PERCH_Y + 4;   // waves cannot reach the perch
-  if (!airborneSafe &&
-      g.ents.some(e=>!e.gone&&(e.t==='wave'||e.t==='proj')&&Math.abs(e.x-P.x)<95)
+    if (b.mode==='dash'){ keys[d>0?'left':'right']=true; if(P.onGround&&jf<=0) jf=10; }
+    else { if(ad>46) keys[d>0?'right':'left']=true;
+           if(ad<150 && P.onGround && jf<=0) jf=11; }        // go for the head
+  } else keys.right = true;                                  // gate open: go sign
+  if (g.ents.some(e=>!e.gone&&(e.t==='wave'||e.t==='proj')&&Math.abs(e.x-P.x)<95)
       && P.onGround && jf<=0) jf=12;
   return {keys, jf};
 }
-// skill: 0 naive, 1 competent, 2 expert. plan: 'bid' | 'wait'
-function runGame(g, {skill=1, plan='wait', maxSec=460, bag=null}={}){
+
+// skill: 0 naive (walks into enemies), 1 competent (dodges, reads anchors),
+// 2 expert (also hunts stomps, which is where the TVPI is)
+function runGame(g, {skill=1, maxSec=460, bag=null}={}){
   return seeded(g, () => {
     g.state='title'; g.keys={action:true}; g.update(F);
     let jf=0, frames=0, prevX=null, still=0;
@@ -219,29 +181,25 @@ function runGame(g, {skill=1, plan='wait', maxSec=460, bag=null}={}){
       if (g.state!=='play'){ g.update(F); continue; }
       const inBoss = g.G.mode==='boss';
       inBoss ? ev.bossSecs+=F : ev.levelSecs+=F;
-      const r = inBoss ? bossStep(g, jf, plan) : levelStep(g, jf, skill);
+      const r = inBoss ? bossStep(g, jf) : levelStep(g, jf, skill);
       jf = r.jf; r.keys.jump = jf-- > 0; g.keys = r.keys;
-      const paper0 = g.G.company ? g.G.company.paper : 0;
-      const exits0 = g.G.exits.length;
+      const tv0 = g.G.tvpi;
       g.update(F);
       if (bag && frames%3===0) checkInvariants(g, 'run', bag);
       // reward accounting for L3 cadence
-      const paper1 = g.G.company ? g.G.company.paper : 0;
-      if (paper1>paper0 || g.G.exits.length>exits0){
-        ev.rewardGaps.push((frames-ev.lastReward)/60); ev.lastReward=frames;
-        if (paper1>paper0) ev.coins++;
+      if (g.G.tvpi > tv0){
+        ev.rewardGaps.push((frames-ev.lastReward)/60); ev.lastReward=frames; ev.coins++;
       }
       if (g.state==='dead' && lastState!=='dead') ev.deaths++;
-      if (g.state==='exit' && lastState!=='exit' && g.G.signed){ ev.dealsWon++;
-        ev.bids+=g.G.deal.bids; ev.free+=g.G.deal.free; }
+      if (g.state==='exit' && lastState!=='exit' && g.G.signed) ev.dealsWon++;
       lastState = g.state;
       // softlock detector: alive, playing, but nothing changes for 12s
       if (prevX!==null && Math.abs(g.P.x-prevX)<0.5 && g.state==='play') still++; else still=0;
       prevX = g.P.x;
       if (still>60*12 && bag) { bag.list.push('run: possible softlock (12s no movement)'); still=0; }
     }
-    return {ev, frames, grade:g.grade()[0], best:g.bestExit(), dpi:g.dpiVal(),
-            tvpi:g.tvpiVal(), exits:g.G.exits.length, anti:g.G.antiPortfolio.length};
+    return {ev, frames, grade:g.grade()[0], tvpi:g.G.tvpi, peak:g.G.peak,
+            lives:g.G.companies, world:g.G.world, done:g.state==='complete'};
   });
 }
 
@@ -361,241 +319,85 @@ function probeFeel(){
 }
 
 // ================================================================ L2 DECISIONS
+// ================================================================ L2 DECISIONS
+// The economy is now one number that is both score and health, so the live
+// question is no longer "what do you buy" but "what do you risk for it".
 function probeDecisions(){
-  // --- the boss: is "bid now" ever competitive with "wait for the opening"?
-  const R = {bid:[], wait:[], platform:[], engaged:[]};
-  for (const plan of ['bid','wait','platform','engaged']){
-    for (let s=0; s<12; s++){
-      const g = boot(100+s);
-      const r = seeded(g, ()=>{
-        g.state='title'; g.keys={boss:true}; g.update(F); g.state='play'; g.keys={};
-        let jf=0, t0=g.G.deal.t;
-        for (let f=0; f<60*75 && g.state==='play'; f++){
-          const st = bossStep(g, jf, plan); jf=st.jf; st.keys.jump = jf-- > 0; g.keys=st.keys;
-          g.update(F);
-        }
-        const won = g.state==='exit' && g.G.signed;
-        return {won, secs:t0-(g.G.deal?g.G.deal.t:0),
-                val:won?g.G.deal.val:null, own:won?+(CHECKV/g.G.deal.val*100).toFixed(1):null};
-      });
-      R[plan].push(r);
-    }
-  }
-  const agg = a => ({winRate:a.filter(r=>r.won).length/a.length,
-                     medVal:median(a.filter(r=>r.won).map(r=>r.val)),
-                     medOwn:median(a.filter(r=>r.won).map(r=>r.own)),
-                     medSecs:median(a.map(r=>r.secs))});
-  const B=agg(R.bid), Wt=agg(R.wait), PF=agg(R.platform), EN=agg(R.engaged);
-  // dominance in EITHER direction kills the decision: if one line wins on every
-  // axis there is nothing to weigh. Check both, and check the platform route too.
-  // A perfect bot never eats an attack, so patience looks free. Re-run both lines
-  // with a human reaction delay: the patient line asks you to read ~3 more tells,
-  // so it should degrade faster than the 4-second rush.
-  const lagged = {};
-  for (const plan of ['bid','engaged']){
-    for (const lag of [0, 8, 14]){
-      const rs = [];
-      for (let s=0;s<10;s++){
-        const g2 = boot(900+s);
-        rs.push(seeded(g2, ()=>{
-          g2.state='title'; g2.keys={boss:true}; g2.update(F); g2.state='play'; g2.keys={};
-          let jf=0;
-          for (let f=0; f<60*70 && g2.state==='play'; f++){
-            const st=bossStep(g2,jf,plan,lag); jf=st.jf; st.keys.jump=jf-->0; g2.keys=st.keys;
-            g2.update(F);
-          }
-          return g2.state==='exit' && g2.G.signed;
-        }));
-      }
-      lagged[plan+'@'+lag] = +(rs.filter(Boolean).length/rs.length).toFixed(2);
-    }
-  }
-  const humanGap = (lagged['bid@8'] - lagged['engaged@8']);
-  add('L2', humanGap > 0.15 ? 'PASS' : 'WARN', 'Boss: price of patience under human reaction',
-      `Win rate by reaction delay (0 / 133ms / 233ms) — bid-on-sight `+
-      `${lagged['bid@0']}/${lagged['bid@8']}/${lagged['bid@14']}, `+
-      `stay-engaged ${lagged['engaged@0']}/${lagged['engaged@8']}/${lagged['engaged@14']}. `+
-      (humanGap > 0.15
-        ? `Patience costs execution: it degrades ${(humanGap*100)|0} points faster than the rush once `+
-          `the player reads tells late, which is what makes paying up a real option rather than a `+
-          `knowledge check. A perfect bot cannot see this — the trade-off only exists for humans.`
-        : `Both lines survive imperfect play about equally, so the decision still leans on price alone.`),
-      lagged);
-
-  // the best patient line available is what bidding must actually compete against.
-  // Dominance is judged against IMPERFECT play: at frame-perfect execution the
-  // cheaper line always wins, which tells you nothing about a human's decision.
-  const bestPatient = [Wt, PF, EN].reduce((a,c)=> c.winRate > a.winRate ? c : a);
-  const execRisk = lagged['bid@8'] - lagged['engaged@8'] > 0.15 ||
-                   lagged['bid@14'] - lagged['engaged@14'] > 0.15;
-  const waitDom = bestPatient.winRate >= B.winRate-0.05 &&
-                  bestPatient.medOwn > B.medOwn*1.2 && !execRisk;
-  const bidDom  = B.winRate > bestPatient.winRate + 0.3;
-  const dominated = waitDom || bidDom;
-  add('L2', dominated?'FAIL':'PASS','Boss: bid vs wait',
-      `bid-on-sight → ${(B.winRate*100)|0}% win, median ${B.medOwn?B.medOwn.toFixed(1):'—'}% ownership, ${B.medSecs.toFixed(1)}s. `+
-      `wait-on-the-floor → ${(Wt.winRate*100)|0}% win${Wt.winRate?`, ${Wt.medOwn.toFixed(1)}% ownership`:' (dies every time)'}. `+
-      `wait-on-the-platform → ${(PF.winRate*100)|0}% win${PF.winRate?`, ${PF.medOwn.toFixed(1)}% ownership`:''}. `+
-      `stay-engaged-and-punish → ${(EN.winRate*100)|0}% win${EN.winRate?`, ${EN.medOwn.toFixed(1)}% ownership, ${EN.medSecs.toFixed(1)}s`:''}. `+
-      (bidDom
-        ? 'Bidding DOMINATES: it wins far more often, and the patient line the pricing rewards is the '+
-          'one that gets you killed. The cheap entry is priced as the skilled play but is not actually '+
-          'achievable, so the "expensive vs patient" decision collapses into "bid or lose the deal".'
-        : waitDom
-        ? 'Waiting is better on price AND no riskier, so bidding is not a temptation but a knowledge check.'
-        : 'Both lines are live: patience is worth 3.3x the ownership but has to be executed under '+
-          'pressure, and bidding buys a safe close for a permanently worse entry price. Standing '+
-          'off is punished outright, so the choice is how to engage, not whether to.'),
-      {bid:B, waitFloor:Wt, waitPlatform:PF, engaged:EN,
-       bidDominates:bidDom, waitDominates:waitDom});
-
-  // --- reserves: a resource with exactly one sink is not a decision
-  const g = boot(7);
-  const sinks = (GAME_SRC.match(/G\.reserves\s*-=/g)||[]).length;
-  add('L2', sinks<=1?'WARN':'PASS','Reserves as a choice',
-      sinks<=1
-        ? `Reserves have ${sinks} sink (follow-on coins) and no competing use, so spending is never `+
-          `weighed against anything — every coin you can afford is strictly correct to take. It reads `+
-          `as a decision and behaves as a depletion timer. Give reserves a second sink (defending pro `+
-          `rata in the boss room, bridging a dying company) and the same number becomes a real choice.`
-        : `${sinks} competing sinks.`, {sinks});
-
-  // --- secondary: is cashing out at 50% ever the right call?
-  const secOK = seeded(g, ()=>{
+  // 1. Is the Down Round Goomba survivable-but-costly, and does zero actually kill?
+  const g = boot(1);
+  const drain = seeded(g, ()=>{
     g.state='title'; g.keys={action:true}; g.update(F);
-    // survival probability from a mid-level position under a competent policy
-    let survived=0, N=14;
-    for (let i=0;i<N;i++){
-      const h = boot(300+i);
-      const r = seeded(h, ()=>{
-        h.state='title'; h.keys={action:true}; h.update(F);
-        let jf=0;
-        for(let f=0; f<60*60 && h.state==='play'; f++){
-          const st=levelStep(h,jf,1); jf=st.jf; st.keys.jump=jf-->0; h.keys=st.keys; h.update(F);
-        }
-        return h.state==='exit';
-      });
-      if (r) survived++;
-    }
-    return survived/N;
+    const gm = g.ents.find(e=>e.t==='goomba' && !e.dead);
+    g.ents = g.ents.filter(e=>e.t!=='coin');
+    g.G.invuln = 0; g.G.fees = 0; g.G.accel = 0;
+    const before = g.G.tvpi;
+    g.P.x = gm.x-14; g.P.y = gm.y+13; g.P.vy = 0; g.P.onGround = true;
+    for (let f=0; f<4; f++){ g.keys={}; g.update(F); }
+    return {cost:+(before-g.G.tvpi).toFixed(2), survived:g.state==='play',
+            mercy:+g.G.invuln.toFixed(2)};
   });
-  // Does buying the big number actually cost you? Three policies, identical motor
-  // skill, differing only in what they do with reserves.
-  const money = {};
-  for (const pol of ['never','always','hypeThenSell']){
-    const rs = [];
-    for (let s=0;s<5;s++){
-      const g2 = boot(1200+s);
-      rs.push(seeded(g2, ()=>{
-        g2.state='title'; g2.keys={action:true}; g2.update(F);
-        let jf=0, peak=0;
-        for (let f=0; f<60*300 && g2.state!=='gameover' && g2.state!=='complete'; f++){
-          if (g2.state!=='play'){ g2.update(F); continue; }
-          const inB = g2.G.mode==='boss';
-          const st = inB ? bossStep(g2, jf, 'engaged') : levelStep(g2, jf, 1);
-          jf = st.jf; st.keys.jump = jf-- > 0;
-          const C = g2.G.company;
-          if (!inB && C){
-            // buy every markup you can afford
-            if (pol!=='never' && f%25===0) st.keys.raise = true;
-            // ...and dump it to a secondary once the mark is mostly air
-            if (pol==='hypeThenSell' && C.hype > (C.paper-C.hype)*1.5) st.keys.sec = true;
-          }
-          g2.keys = st.keys; g2.update(F);
-          peak = Math.max(peak, g2.tvpiVal());   // the number you WATCH, not the one you end on
-        }
-        return {dpi:g2.dpiVal(), peak, best:g2.bestExit(), grade:g2.grade()[0]};
-      }));
-    }
-    money[pol] = {dpi:+median(rs.map(r=>r.dpi)).toFixed(2),
-                  peakTvpi:+median(rs.map(r=>r.peak)).toFixed(2),
-                  best:+median(rs.map(r=>r.best)).toFixed(0),
-                  grades:[...new Set(rs.map(r=>r.grade))]};
-  }
-  // Controlled ladder: same company, same instant, differing only in markups bought.
-  // (The full-run policy sweep above confounds markup-buying with reserve starvation,
-  // so it cannot answer "is the number purchasable?" — only this can.)
-  const ladder = [];
-  for (let raises=0; raises<=3; raises++){
-    const g4 = boot(1700+raises);
-    ladder.push(seeded(g4, ()=>{
-      g4.state='title'; g4.keys={action:true}; g4.update(F);
-      const C = g4.G.company;
-      for (let i=0;i<raises;i++){ g4.keys={raise:true}; g4.update(F); }
-      const real = C.paper - C.hype;
-      return {raises, tvpi:+g4.tvpiVal().toFixed(2), mark:+C.paper.toFixed(0),
-              keeps:+(real + C.hype*0.15).toFixed(1), own:+g4.P.scale.toFixed(2)};
-    }));
-  }
-  const top = ladder[ladder.length-1], bot = ladder[0];
-  const trapWorks = top.tvpi > bot.tvpi * 1.5 && top.keeps < top.mark * 0.5;
-  add('L2', trapWorks?'PASS':'FAIL','TVPI is a purchasable lie',
-      `Same company, markups bought with reserves — ` +
-      ladder.map(l=>`${l.raises}: TVPI ${l.tvpi}x, mark $${l.mark}M, keeps $${l.keeps}M, own ${l.own}`).join(' · ') + '. ' +
-      (trapWorks
-        ? `The headline number is genuinely purchasable — ${bot.tvpi}x to ${top.tvpi}x — while the cash `+
-          `it converts to barely moves and your ownership shrinks to ${top.own}. Each purchase is `+
-          `locally thrilling and collectively fatal, and the capital it burns is the same capital that `+
-          `would have produced real value. The joke is charged, not captioned.`
-        : `Markups do not raise the watched number enough, or convert too well, so TVPI is still a `+
-          `caption on DPI rather than a purchase that costs you.`),
-      {ladder, fullRunPolicies:money});
-  add('L2','INFO','Cost of the lie across a whole run',
-      `Played straight → peak TVPI ${money.never.peakTvpi}x, DPI ${money.never.dpi}x. Buying every `+
-      `markup → peak ${money.always.peakTvpi}x, DPI ${money.always.dpi}x. Buying markups also raises `+
-      `follow-on prices for every later coin, so the button is seductive per-press and punishing per-run. `+
-      `That asymmetry is the design; watch that it stays a temptation rather than becoming a trap no `+
-      `informed player ever presses.`, money);
+  const g2 = boot(2);
+  const zero = seeded(g2, ()=>{
+    g2.state='title'; g2.keys={action:true}; g2.update(F);
+    g2.G.tvpi = 0.3;
+    const gm = g2.ents.find(e=>e.t==='goomba' && !e.dead);
+    g2.G.invuln = 0;
+    g2.P.x = gm.x-14; g2.P.y = gm.y+13; g2.P.vy = 0; g2.P.onGround = true;
+    for (let f=0; f<6; f++){ g2.keys={}; g2.update(F); }
+    return {died:g2.state==='dead', lives:g2.G.companies, tvpi:+g2.G.tvpi.toFixed(2)};
+  });
+  const ok = drain.survived && drain.cost > 0 && zero.died;
+  add('L2', ok?'PASS':'FAIL','TVPI is score and health at once',
+      `A Down Round Goomba costs ${drain.cost.toFixed(2)}x and leaves you alive with `+
+      `${drain.mercy.toFixed(2)}s of mercy; at 0.30x the same hit kills the company `+
+      `(lives ${zero.lives}). `+
+      (ok ? `One number carries both jobs, so every term sheet is simultaneously score and `+
+            `insurance — the greed/safety trade is priced in the same currency the player is `+
+            `trying to maximise.`
+          : `The drain/zero rule is not behaving: a down round must hurt without killing, and `+
+            `zero must kill.`),
+      {drain, zero});
 
-  // Sirlin's counterpick test: an option need not be equal, only correct SOMEWHERE.
-  // Ask directly — at each level of purchased hype, does selling beat holding?
-  const sec = [];
-  for (let raises=0; raises<=3; raises++){
-    const g3 = boot(1500+raises);
-    sec.push(seeded(g3, ()=>{
-      g3.state='title'; g3.keys={action:true}; g3.update(F);
-      const C = g3.G.company;
-      for (let i=0;i<raises;i++){ g3.keys={raise:true}; g3.update(F); }
-      const real = C.paper - C.hype;
-      const hold = real + C.hype*0.15;
-      const sell = C.paper*0.5;
-      return {raises, hold:+hold.toFixed(1), sell:+sell.toFixed(1), sellWins: sell > hold};
-    }));
-  }
-  const sellEverWins = sec.some(s=>s.sellWins);
-  const breakeven = sec.find(s=>s.sellWins);
-  add('L2', sellEverWins?'PASS':'WARN','Secondary sale',
-      `hold-vs-sell by purchased markups — ` +
-      sec.map(s=>`${s.raises}: hold $${s.hold}M vs sell $${s.sell}M${s.sellWins?' ✓sell':''}`).join(' · ') + '. ' +
-      (sellEverWins
-        ? `Selling becomes correct from ${breakeven.raises} purchased markup(s) onward: once the mark is `+
-          `mostly air, a buyer paying 50% of it beats holding air that converts at 15%. The option is no `+
-          `longer dominated — it has a state where it wins, and that state is one the player creates.`
-        : `Selling never wins at any hype level, so it remains dominated.`),
-      {ladder:sec, breakevenRaises: breakeven ? breakeven.raises : null});
+  // 2. Two enemy classes must actually differ — one drains, one kills
+  const g3 = boot(3);
+  const pivot = seeded(g3, ()=>{
+    g3.state='title'; g3.keys={action:true}; g3.update(F);
+    const p = g3.ents.find(e=>e.t==='pivot' && !e.dead);
+    g3.G.invuln = 0; g3.G.fees = 0; g3.G.accel = 0;
+    g3.P.x = p.x-14; g3.P.y = p.groundY+13; g3.P.vy = 0;
+    for (let f=0; f<4; f++){ g3.keys={}; g3.update(F); }
+    return g3.state==='dead';
+  });
+  add('L2', pivot?'PASS':'FAIL','Enemy classes read differently',
+      pivot ? `Down Round Goomba drains, Serial Pivot kills outright. Two silhouettes, two `+
+              `rules, and the rule matches the joke — a down round marks you down, a pivot ends `+
+              `you. That is the difference a player can learn by dying once.`
+            : `The Serial Pivot did not kill on contact, so both enemies now read the same.`,
+      {pivotKills:pivot});
 
-  add('L2', secOK>0.8?'INFO':'PASS','Flag reach rate',
-      `A competent run reaches the flag ${(secOK*100)|0}% of the time. Selling at 50% of the mark is `+
-      (secOK>0.8
-        ? `therefore dominated: you forfeit half your value to avoid a ~${(100-secOK*100)|0}% risk. It is `+
-          `currently a trap rather than a choice — correctly labelled "coward's button", but a button no `+
-          `informed player ever presses is dead surface. It needs a state where it wins: a fund clock `+
-          `about to expire, or a company visibly deteriorating.`
-        : `a live option against that risk.`), {flagReachRate:+secOK.toFixed(2)});
-
-  // --- legibility: does every terminal outcome state a cause?
-  const causes = ['lastPass','deathOverride'].every(k => GAME_SRC.includes(k));
-  add('L2', causes?'PASS':'FAIL','Loss legibility',
-      causes ? 'Every death and lost deal surfaces a named cause on its card, so the player can '+
-               'attribute the outcome to a decision rather than to noise.' : 'Some losses are unexplained.',
-      {deathCard:true, dealCard:true});
-  return {dominated, sinks, secOK};
+  // 3. Risk/reward: the sky lane holds the value, and it costs exposure
+  const g4 = boot(4);
+  const lanes = seeded(g4, ()=>{
+    g4.state='title'; g4.keys={action:true}; g4.update(F);
+    let ground=0, sky=0;
+    for (const e of g4.ents) if (e.t==='coin' && e.val)
+      (e.y > 8*g4.K.TILE ? (v=>ground+=v) : (v=>sky+=v))(e.val);
+    return {ground:+ground.toFixed(2), sky:+sky.toFixed(2)};
+  });
+  const worth = lanes.sky > lanes.ground * 1.2;
+  add('L2', worth?'PASS':'WARN','Sky lane is worth the climb',
+      `Ground lane pays ${lanes.ground.toFixed(2)}x, sky lane ${lanes.sky.toFixed(2)}x. `+
+      (worth ? `Climbing is worth roughly ${(lanes.sky/Math.max(0.01,lanes.ground)).toFixed(1)}x `+
+               `the safe route, which is what makes "how high do you go" a real question.`
+             : `The two routes pay about the same, so there is no reason to take the risky one.`),
+      lanes);
+  return {drain, zero, lanes};
 }
 
-// ================================================================ L3 LOOP
+
 function probeLoop(){
   const runs = [];
-  for (let s=0;s<6;s++) runs.push(runGame(boot(400+s), {skill:1, plan:'engaged'}));
+  for (let s=0;s<6;s++) runs.push(runGame(boot(400+s), {skill:1}));
   const gaps = runs.flatMap(r=>r.ev.rewardGaps);
   const meanGap = gaps.reduce((a,b)=>a+b,0)/Math.max(1,gaps.length);
   const maxGap = Math.max(...gaps);
@@ -638,7 +440,7 @@ function probeLoop(){
       for(let f=0; f<60*400 && g2.state!=='gameover' && g2.state!=='complete'; f++){
         if(g2.state!=='play'){ g2.update(F); continue; }
         const inB = g2.G.mode==='boss';
-        const st = inB?bossStep(g2,jf,'wait'):levelStep(g2,jf,1);
+        const st = inB?bossStep(g2,jf):levelStep(g2,jf,1);
         jf=st.jf; st.keys.jump=jf-->0; g2.keys=st.keys; g2.update(F);
         if(g2.state==='dead'&&last!=='dead') deathTimes.push(f/60);
         last=g2.state;
@@ -660,26 +462,28 @@ function probeDepth(){
   // three rungs: survive the level → also survive the boss cheaply.
   // (a fancier coin-routing tier existed and measured its own bugs, not the game)
   const tiers = [
-    {name:'naive   (weak platforming, bids on sight)', skill:0, plan:'bid'},
-    {name:'competent (solid platforming, still bids)',  skill:1, plan:'bid'},
-    {name:'expert  (solid platforming, stays engaged)', skill:1, plan:'engaged'},
+    {name:'naive     (no coin routing, walks into things)', skill:0},
+    {name:'competent (dodges, takes what is on the path)', skill:1},
+    {name:'expert    (routes for the sky lane)',           skill:2},
   ];
   const out = [];
   for (const t of tiers){
     const rs = [];
-    for (let s=0;s<6;s++) rs.push(runGame(boot(600+s), {skill:t.skill, plan:t.plan}));
-    out.push({...t, best:median(rs.map(r=>r.best)), dpi:median(rs.map(r=>r.dpi)),
-              grades:rs.map(r=>r.grade), won:rs.reduce((a,r)=>a+r.ev.dealsWon,0),
-              lost:rs.reduce((a,r)=>a+r.ev.dealsLost,0)});
+    for (let s=0;s<6;s++) rs.push(runGame(boot(600+s), {skill:t.skill}));
+    out.push({...t, tvpi:median(rs.map(r=>r.tvpi)), peak:median(rs.map(r=>r.peak)),
+              grades:rs.map(r=>r.grade), done:rs.filter(r=>r.done).length,
+              deaths:rs.reduce((a,r)=>a+r.ev.deaths,0)});
   }
-  const lo = out[0].best, hi = out[2].best;
+  const lo = out[0].tvpi, hi = out[2].tvpi;
   const spread = lo>0 ? hi/lo : (hi>0?Infinity:1);
   add('L4', spread>2?'PASS':'WARN','Skill expressiveness',
-      `Median best exit — naive $${lo.toFixed(0)}M, competent $${out[1].best.toFixed(0)}M, expert $${hi.toFixed(0)}M `+
-      `(${isFinite(spread)?spread.toFixed(1)+'x':'∞'} spread). `+
+      `Median final TVPI — naive ${lo.toFixed(2)}x, competent ${out[1].tvpi.toFixed(2)}x, `+
+      `expert ${hi.toFixed(2)}x (${isFinite(spread)?spread.toFixed(1)+'x':'∞'} spread); `+
+      `runs completed ${out.map(o=>o.done).join('/')} of 6 each. `+
       (spread>2 ? 'Skill visibly changes the outcome, which is what keeps the fight worth re-learning.'
                 : 'Skill barely moves the score — the systems are close to solved on first contact.'),
-      {naive:+lo.toFixed(0), competent:+out[1].best.toFixed(0), expert:+hi.toFixed(0), spread:+spread.toFixed(2)});
+      {naive:+lo.toFixed(2), competent:+out[1].tvpi.toFixed(2), expert:+hi.toFixed(2),
+       spread:+spread.toFixed(2), completed:out.map(o=>o.done)});
   const gradesSeen = new Set(out.flatMap(o=>o.grades));
   add('L4', gradesSeen.size>=3?'PASS':'WARN','Outcome ceiling',
       `Grades observed across all policies: ${[...gradesSeen].join(', ')}. `+
@@ -690,16 +494,16 @@ function probeDepth(){
       {grades:[...gradesSeen]});
   // depth = do the rules interact, or are they parallel?
   const interactions = [
-    ['dilution × pro rata', GAME_SRC.includes('P.scale/DILUTE')],
-    ['round × follow-on cost', GAME_SRC.includes('FOLLOWON_COST[Math.min(C.round')],
-    ['boss price × company marks', GAME_SRC.includes('(C.mult || 1)')],
-    ['ownership × sprite size', GAME_SRC.includes('0.6 + 0.4 * Math.min(1, hot.mult / 4)')],
+    ['TVPI as score and health', GAME_SRC.includes('addTvpi(-DOWN_ROUND')],
+    ['drain vs kill enemy split', GAME_SRC.includes("return 'pivoted into you'")],
+    ['acceleration beats NPCs, not anchors', GAME_SRC.includes('G.accel > 0 || G.fees > 0')],
+    ['pro rata heals what a down round took', GAME_SRC.includes('TVPI_PRORATA')],
   ];
   add('L4','PASS','Rule interaction',
-      `${interactions.filter(i=>i[1]).length}/${interactions.length} systems feed each other rather than `+
-      `running in parallel: ${interactions.filter(i=>i[1]).map(i=>i[0]).join('; ')}. `+
-      `That is where depth comes from — the boss price silently rewrites the economics of a level you `+
-      `play minutes later.`, {interactions:interactions.map(i=>i[0])});
+      `${interactions.filter(i=>i[1]).length}/${interactions.length} systems feed each other: `+
+      `${interactions.filter(i=>i[1]).map(i=>i[0]).join('; ')}. One currency doing two jobs is `+
+      `where the depth comes from — every term sheet is both points and armour, so greed and `+
+      `safety are priced in the same number.`, {interactions:interactions.map(i=>i[0])});
   return {spread, grades:[...gradesSeen], tiers:out};
 }
 
@@ -709,7 +513,6 @@ function probeFairness(){
   const rngSites = [
     ['founder pitch art',      'pitch: (RNG()',              'cosmetic, pre-decision'],
     ['death flavour text',     'PASS_LINES[(RNG()',          'cosmetic, post-outcome'],
-    ['anti-portfolio mark',    'mark: 1400 + RNG()',         'cosmetic, post-outcome'],
     ['particle scatter',       'Math.random() * Math.PI',    'cosmetic, render-only'],
   ];
   const present = rngSites.filter(s=>GAME_SRC.includes(s[1]));
@@ -723,7 +526,7 @@ function probeFairness(){
   }
   // every RNG call must be reachable only from cosmetic paths
   const gameplayRng = /RNG\(\)/.test(GAME_SRC) &&
-    /(vx|vy|paper|val|hp|mult|own|damage)\s*[+\-*/]?=\s*[^;\n]*RNG\(\)/.test(GAME_SRC);
+    /(vx|vy|tvpi|hp|damage)\s*[+\-*/]?=\s*[^;\n]*RNG\(\)/.test(GAME_SRC);
   if (gameplayRng)
     add('FAIR','FAIL','Randomness in outcomes',
         'An RNG call feeds a physics or economic value. Randomness after a decision removes credit '+
@@ -736,13 +539,14 @@ function probeFairness(){
       {sites:present.map(s=>s[0]), postDecisionRolls:0});
 
   // determinism: identical inputs must produce identical outcomes
-  const a = runGame(boot(42), {skill:1, plan:'wait'});
-  const b = runGame(boot(42), {skill:1, plan:'wait'});
-  const same = a.best===b.best && a.exits===b.exits && a.grade===b.grade;
+  const a = runGame(boot(42), {skill:1});
+  const b = runGame(boot(42), {skill:1});
+  const same = a.tvpi===b.tvpi && a.grade===b.grade && a.world===b.world;
   add('FAIR', same?'PASS':'FAIL','Determinism',
       same ? 'Same seed and same inputs reproduce the run exactly — bugs are reproducible and the '+
              'harness can bisect regressions.'
-           : `Divergence: ${a.grade}/${a.best} vs ${b.grade}/${b.best}.`, {a:a.best,b:b.best});
+           : `Divergence: ${a.grade}/${a.tvpi} vs ${b.grade}/${b.tvpi}.`,
+      {a:+a.tvpi.toFixed(3), b:+b.tvpi.toFixed(3)});
 
   // unavoidable damage: is the player ever killed with no counter available?
   const g = boot(11);
@@ -761,7 +565,7 @@ function probeFairness(){
 // ================================================================ BUGS
 function probeBugs(){
   const bag = {seen:new Set(), list:[]};
-  for (let s=0;s<8;s++) runGame(boot(700+s), {skill:s%3, plan:s%2?'bid':'wait', bag});
+  for (let s=0;s<8;s++) runGame(boot(700+s), {skill:s%3, bag});
   // targeted edge cases
   const g = boot(999);
   seeded(g, ()=>{
@@ -801,74 +605,39 @@ function median(a){ if(!a.length) return 0; const s=[...a].sort((x,y)=>x-y);
 // and git holds the rollback. A recommendation here is a measured result.
 // A live decision needs BOTH lines playable, patience meaningfully cheaper, and
 // patience no longer strictly safe. That predicate is the bar for every clock tune.
-const liveDecision = v => {
-  const pat = [v.boss.wait, v.boss.platform, v.boss.engaged]
-                .reduce((a,c)=> c.winRate > a.winRate ? c : a);
-  return v.boss.bid.winRate >= 0.7          // bidding still reliably closes
-      && pat.winRate >= 0.45                // patience is playable, not a coin flip
-      && pat.medOwn > v.boss.bid.medOwn*1.5 // and worth a lot more when it lands
-      && v.boss.wait.winRate < pat.winRate - 0.2  // passive standing off is punished
-      && v.runs.violations.length === 0;
-};
+// A tuning is good when a naive player is genuinely threatened, a skilled one
+// finishes, and the two end up meaningfully apart on the only number there is.
+const healthy = v =>
+     v.runs.violations.length === 0
+  && v.runs.expert.done                       // the game is completable
+  && v.runs.naive.deaths > 0                  // and careless play is punished
+  && v.runs.expert.tvpi > v.runs.naive.tvpi * 1.3;
+
 const EXPERIMENTS = [
- {id:'rival20', name:'Rival closes slower (16s → 20s)', deps:[],
-  jump:'The patient line takes ~14s. At 16s it stops being free: you can still wait him out, '+
-       'but a slow read loses the deal outright, and bidding (+4s each) becomes the way to buy '+
-       'your way back into patience.',
-  patches:[{find:"const DEAL_SECS  = 16;", repl:"const DEAL_SECS  = 20;"}],
-  judge:(b,v)=>liveDecision(v)},
+ {id:'harshDown', name:'Down rounds hurt more (0.40 -> 0.60)', deps:[],
+  jump:'A Down Round Goomba takes more than half a term-sheet run. Makes the drain a real '+
+       'threat rather than a scratch, at the risk of making the level feel unfair.',
+  patches:[{find:"const DOWN_ROUND  = 0.40;", repl:"const DOWN_ROUND  = 0.60;"}],
+  judge:(b,v)=> healthy(v) && v.runs.naive.deaths >= b.runs.naive.deaths},
 
- {id:'rival12', name:'Rival closes much faster (16s → 12s)', deps:[],
-  jump:'Tighter still — tests whether the decision survives when patience usually fails, or '+
-       'whether it just collapses back into "bid or lose" from the other side.',
-  patches:[{find:"const DEAL_SECS  = 16;", repl:"const DEAL_SECS  = 12;"}],
-  judge:(b,v)=>liveDecision(v)},
+ {id:'softDown', name:'Down rounds hurt less (0.40 -> 0.25)', deps:[],
+  jump:'Gentler drain. Tests the other side: if this is also healthy, the value is not '+
+       'load-bearing and the number can be chosen for feel.',
+  patches:[{find:"const DOWN_ROUND  = 0.40;", repl:"const DOWN_ROUND  = 0.25;"}],
+  judge:(b,v)=> healthy(v) && v.runs.naive.deaths >= b.runs.naive.deaths},
 
- {id:'landing', name:'Landings have weight', deps:[],
-  jump:'Every real fall punctuates, not just near-max-height ones. The most frequent physical '+
-       'event in the game currently lands in silence.',
-  patches:[{find:"if (P.holdT > HOLD_MAX*0.8 && P.vy > 700) G.shake = 0.25;",
-            repl:"if (P.vy > 430) { G.shake = Math.max(G.shake, Math.min(0.22, P.vy/4200)); "+
-                 "burst(P.x, P.y, 4, '#584d78', 90); }"}],
-  judge:(b,v)=> v.feel.landShake > 0 && v.runs.violations.length === 0 &&
-                v.runs.expert.best >= b.runs.expert.best * 0.9},
+ {id:'tightClock', name:'Tighter runway (45s -> 30s)', deps:[],
+  jump:'Level 1 needs ~18s of pure running. At 30s, detouring up to the sky lane costs '+
+       'real time and the timer becomes a decision instead of scenery.',
+  patches:[{find:"{ level: '1-1', boss: 'boss',  secs: 45 },",
+            repl:"{ level: '1-1', boss: 'boss',  secs: 30 },"}],
+  judge:(b,v)=> healthy(v)},
 
- {id:'momentum', name:'Ground momentum (instant → ramped)', deps:[],
-  jump:'Acceleration and skid instead of snap-to-speed, so ground movement carries weight and '+
-       'rewards planning a run-up. NOTE: a taste call the harness cannot settle — it can only '+
-       'confirm the change costs nothing measurable.',
-  patches:[{find:"P.vx = ax * RUN;",
-            repl:"{ const tgt = ax * RUN, rate = (ax === 0 ? 5200 : 3000) * dt;\n"+
-                 "    P.vx += Math.max(-rate, Math.min(rate, tgt - P.vx)); }"}],
-  judge:(b,v)=> v.feel.rampFrames > 2 && v.runs.violations.length === 0 &&
-                v.runs.expert.best >= b.runs.expert.best * 0.9 &&
-                v.boss.bid.winRate >= b.boss.bid.winRate - 0.05},
-
- {id:'telegraph', name:'Longer tell before the dash (0.5s → 0.85s)', deps:[],
-  jump:'The patient line currently needs frame-perfect reads: at a normal 133ms reaction it wins 0%. '+
-       'A longer tell hands that time back, so patience becomes a skill you can actually execute '+
-       'rather than one only a bot can.',
-  patches:[{find:"b.mode = 'telegraph'; b.timer = 0.5 / sp;",
-            repl:"b.mode = 'telegraph'; b.timer = 0.85 / sp;"}],
-  judge:(b,v)=> v.boss.engagedLag.winRate >= 0.5 &&
-                v.boss.engagedLag.winRate > b.boss.engagedLag.winRate + 0.2 &&
-                v.boss.bid.winRate >= 0.7 && v.runs.violations.length === 0},
-
- {id:'fastdash', name:'Dash back to fast (430 → 560)', deps:[],
-  jump:'Same goal as the longer tell, bought differently: a slower charge is readable late. '+
-       'Tested separately so the harness can say which lever actually pays.',
-  patches:[{find:"b.vx = b.face * 430 * sp; b.timer = 0.78;",
-            repl:"b.vx = b.face * 560 * sp; b.timer = 0.62;"}],
-  judge:(b,v)=> v.boss.engagedLag.winRate >= 0.5 &&
-                v.boss.engagedLag.winRate > b.boss.engagedLag.winRate + 0.2 &&
-                v.boss.bid.winRate >= 0.7 && v.runs.violations.length === 0},
-
- {id:'reserves2', name:'Dry powder push costs more ($8M → $20M)', deps:[],
-  jump:'Reserves become spendable in the boss room: burn $8M to push the rival back 3s. That '+
-       'gives the resource a competing use, so "spend or hold" finally weighs two things against '+
-       'each other instead of having one correct answer.',
-  patches:[{find:"const RESERVE_PUSH_COST = 8;", repl:"const RESERVE_PUSH_COST = 20;"}],
-  judge:(b,v)=> liveDecision(v) && v.runs.violations.length === 0},
+ {id:'leanStomp', name:'Stomping pays less (0.15 -> 0.05)', deps:[],
+  jump:'Reverts the shipped stomp reward. Kept so the value stays bracketed from both '+
+       'sides rather than being a number somebody once picked.',
+  patches:[{find:"const TVPI_STOMP  = 0.15;", repl:"const TVPI_STOMP  = 0.05;"}],
+  judge:(b,v)=> healthy(v) && v.runs.expert.tvpi > b.runs.expert.tvpi},
 ];
 
 function applyPatches(src, ids){
@@ -928,54 +697,18 @@ function quickFeel(src){
   return {coyoteMs: coyote<0?0:(coyote/60*1000)|0, bufferMs: buffer<0?0:(buffer/60*1000)|0,
           rampFrames: ramp, landShake: +landShake.toFixed(3)};
 }
-function evalBoss(src, seeds){
-  const plans = {bid:[], wait:[], platform:[], engaged:[]};
-  for (const plan of Object.keys(plans))
-    for (let s=0; s<seeds; s++){
-      const g = boot(3000+s, src);
-      plans[plan].push(seeded(g, ()=>{
-        g.state='title'; g.keys={boss:true}; g.update(F); g.state='play'; g.keys={};
-        let jf=0;
-        for (let f=0; f<60*80 && g.state==='play'; f++){
-          const st=bossStep(g,jf,plan); jf=st.jf; st.keys.jump=jf-->0; g.keys=st.keys; g.update(F);
-        }
-        return (w=>({won:w, own:w?+(CHECKV/g.G.deal.val*100).toFixed(1):0}))(g.state==='exit'&&g.G.signed);
-      }));
-    }
-  const agg = a => ({winRate:+(a.filter(r=>r.won).length/a.length).toFixed(2),
-                     medOwn:+median(a.filter(r=>r.won).map(r=>r.own)).toFixed(1)});
-  // the same patient line played with a human's 133ms reaction delay
-  const lagRuns = [];
-  for (let s=0; s<seeds; s++){
-    const g = boot(3000+s, src);
-    lagRuns.push(seeded(g, ()=>{
-      g.state='title'; g.keys={boss:true}; g.update(F); g.state='play'; g.keys={};
-      let jf=0;
-      for (let f=0; f<60*70 && g.state==='play'; f++){
-        const st=bossStep(g,jf,'engaged',8); jf=st.jf; st.keys.jump=jf-->0; g.keys=st.keys; g.update(F);
-      }
-      return (w=>({won:w, own:w?+(CHECKV/g.G.deal.val*100).toFixed(1):0}))(g.state==='exit'&&g.G.signed);
-    }));
-  }
-  return {bid:agg(plans.bid), wait:agg(plans.wait), platform:agg(plans.platform),
-          engaged:agg(plans.engaged), engagedLag:agg(lagRuns)};
-}
 function evalRuns(src){
-  // expert stays engaged and punishes openings — the patient line the pricing
-  // rewards. (standing off is 'wait' and is meant to be punished; the perch is a
-  // decoy at 8px clearance. Both measured separately in probeDecisions.)
-  const pols=[{n:'naive',skill:0,plan:'bid'},{n:'expert',skill:1,plan:'engaged'}];
+  const pols=[{n:'naive',skill:0},{n:'expert',skill:2}];
   const out={}; const bag={seen:new Set(), list:[]};
   for (const p of pols){
     const rs=[];
-    for (let s=0; s<3; s++) rs.push(runGame(boot(4000+s, src), {skill:p.skill, plan:p.plan, maxSec:300, bag}));
-    out[p.n]={best:+median(rs.map(r=>r.best)).toFixed(0),
+    for (let s=0; s<3; s++) rs.push(runGame(boot(4000+s, src), {skill:p.skill, maxSec:300, bag}));
+    out[p.n]={tvpi:+median(rs.map(r=>r.tvpi)).toFixed(2),
               deaths:rs.reduce((a,r)=>a+r.ev.deaths,0),
-              won:rs.reduce((a,r)=>a+r.ev.dealsWon,0),
+              done:rs.some(r=>r.done),
               grades:[...new Set(rs.map(r=>r.grade))]};
   }
-  out.spread = out.naive.best>0 ? +(out.expert.best/out.naive.best).toFixed(2)
-                                : (out.expert.best>0?99:1);
+  out.spread = out.naive.tvpi>0 ? +(out.expert.tvpi/out.naive.tvpi).toFixed(2) : 99;
   out.violations = bag.list;
   return out;
 }
@@ -987,7 +720,7 @@ async function runExperiments(setStatus){
     const {src, missing} = applyPatches(GAME_SRC, ids);
     if (missing.length){ const r={stale:missing}; cache.set(key,r); return r; }
     setStatus('experiment: '+key+'…'); await tick();
-    const r = {feel:quickFeel(src), boss:evalBoss(src,8), runs:evalRuns(src)};
+    const r = {feel:quickFeel(src), runs:evalRuns(src)};
     cache.set(key, r); return r;
   }
   const base = await evalFor([]);
@@ -1005,8 +738,20 @@ async function runExperiments(setStatus){
     }
     results.push({ex, verdict, note, baseline, variant});
   }
+  // Experiments that touch the same line are alternatives, not a set: keep the
+  // first adopted one per anchor so the combo is actually applicable.
+  const seenFind = new Set(), comboIds = [];
+  for (const id of adopted){
+    const ex = EXPERIMENTS.find(e=>e.id===id);
+    const anchors = ex.patches.map(x=>x.find);
+    if (anchors.some(f=>seenFind.has(f))) continue;
+    anchors.forEach(f=>seenFind.add(f)); comboIds.push(id);
+  }
   let combo = null;
-  if (adopted.length){ combo = await evalFor(adopted); combo.ids = adopted.slice(); }
+  if (comboIds.length){
+    const c = await evalFor(comboIds);
+    if (!c.stale){ combo = c; combo.ids = comboIds.slice(); }
+  }
   return {base, results, combo, adopted};
 }
 
@@ -1015,36 +760,27 @@ async function runExperiments(setStatus){
 // bots cannot feel (impact, audio) remains judgement — flagged as such.
 function evidence(r){
   if (r.verdict==='STALE') return r.note;
-  const b=r.baseline, v=r.variant;
-  const bits=[];
-  const pat = x => [x.boss.wait, x.boss.platform, x.boss.engaged]
-                     .reduce((a,c)=> c.winRate > a.winRate ? c : a);
-  if (pat(v).winRate !== pat(b).winRate)
-    bits.push(`patient win ${(pat(b).winRate*100)|0}%→${(pat(v).winRate*100)|0}%`);
-  if (v.boss.bid.winRate !== b.boss.bid.winRate)
-    bits.push(`bid win ${(b.boss.bid.winRate*100)|0}%→${(v.boss.bid.winRate*100)|0}%`);
-  if (pat(v).medOwn && pat(v).medOwn !== pat(b).medOwn)
-    bits.push(`patient ownership ${pat(b).medOwn||0}%→${pat(v).medOwn}%`);
-  if (v.runs.expert.deaths !== b.runs.expert.deaths || v.runs.naive.deaths !== b.runs.naive.deaths)
-    bits.push(`deaths ${b.runs.naive.deaths+b.runs.expert.deaths}→${v.runs.naive.deaths+v.runs.expert.deaths}`);
-  if (v.runs.spread !== b.runs.spread) bits.push(`skill spread ${b.runs.spread}x→${v.runs.spread}x`);
-  if (JSON.stringify(v.runs.expert.grades)!==JSON.stringify(b.runs.expert.grades))
-    bits.push(`expert grades: ${v.runs.expert.grades.join('/')}`);
-  if (v.feel.coyoteMs !== b.feel.coyoteMs) bits.push(`coyote ${b.feel.coyoteMs}→${v.feel.coyoteMs}ms`);
-  if (v.feel.bufferMs !== b.feel.bufferMs) bits.push(`buffer ${b.feel.bufferMs}→${v.feel.bufferMs}ms`);
-  if (v.runs.violations.length) bits.push(`⚠ ${v.runs.violations.length} invariant violations`);
-  return bits.join(' · ') || 'no measurable change';
+  const b=r.baseline, v=r.variant, bits=[];
+  if (v.runs.expert.tvpi !== b.runs.expert.tvpi)
+    bits.push(`expert TVPI ${b.runs.expert.tvpi}x\u2192${v.runs.expert.tvpi}x`);
+  if (v.runs.naive.tvpi !== b.runs.naive.tvpi)
+    bits.push(`naive TVPI ${b.runs.naive.tvpi}x\u2192${v.runs.naive.tvpi}x`);
+  if (v.runs.naive.deaths !== b.runs.naive.deaths)
+    bits.push(`naive deaths ${b.runs.naive.deaths}\u2192${v.runs.naive.deaths}`);
+  if (v.runs.expert.done !== b.runs.expert.done)
+    bits.push(`completable ${b.runs.expert.done}\u2192${v.runs.expert.done}`);
+  if (v.runs.violations.length) bits.push(`${v.runs.violations.length} violation(s)`);
+  return bits.join(' \u00b7 ') || 'no measurable change';
 }
 function recommend(EXP){
   const recs=[]; let p=1;
   for (const r of EXP.results.filter(r=>r.verdict==='ADOPT'))
     recs.push({p:p++, t:`ADOPT — ${r.ex.name}`, w:`${r.ex.jump}  Measured: ${evidence(r)}.`});
-  if (EXP.combo)
+  if (EXP.combo && EXP.combo.runs)
     recs.push({p:p++, t:`SHIP THE SET — ${EXP.combo.ids.join(' + ')}`,
-      w:`All adopted patches together: patient win ${(EXP.combo.boss.platform.winRate*100)|0}% at `+
-        `${EXP.combo.boss.platform.medOwn}% ownership vs bid ${(EXP.combo.boss.bid.winRate*100)|0}% at `+
-        `${EXP.combo.boss.bid.medOwn}%, deaths ${EXP.combo.runs.naive.deaths+EXP.combo.runs.expert.deaths}, `+
-        `skill spread ${EXP.combo.runs.spread}x, expert grades ${EXP.combo.runs.expert.grades.join('/')}. `+
+      w:`All adopted patches together: expert TVPI ${EXP.combo.runs.expert.tvpi}x vs naive `+
+        `${EXP.combo.runs.naive.tvpi}x (${EXP.combo.runs.spread}x spread), naive deaths `+
+        `${EXP.combo.runs.naive.deaths}, completable ${EXP.combo.runs.expert.done}. `+
         `${EXP.combo.runs.violations.length? '⚠ violations: '+EXP.combo.runs.violations.join(' | ')
                                            : 'Zero invariant violations under the full set.'}`});
   for (const r of EXP.results.filter(r=>r.verdict==='REJECT'))
@@ -1057,10 +793,10 @@ function recommend(EXP){
     w:`Bots cannot feel impact, so this ships on judgement: 3-4 frames of hit-stop and a short `+
       `shake on Goomba kills, behind the same git tag. The harness's job here is only to confirm `+
       `nothing broke afterwards.`});
-  recs.push({p:p++, t:'NEXT EXPERIMENTS TO WRITE — reserves second sink; anti-portfolio mid-run',
-    w:`Both are structural bets the current patch set cannot express in one string replacement. `+
-      `Worth writing as proper experiment patches next: reserves spendable in the boss room, and `+
-      `the anti-portfolio's rising marks surfaced between levels.`});
+  recs.push({p:p++, t:'NEXT EXPERIMENTS TO WRITE — enemy density; sky-lane signposting',
+    w:`Neither is a one-string patch. Level 1 has 6 enemies across 168 tiles, which is thin for a `+
+      `game whose verb is stomping; and the sky lane holds most of the value with nothing pointing `+
+      `at it. Both want map edits, then a re-run.`});
   return recs;
 }
 

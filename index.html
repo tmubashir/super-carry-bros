@@ -32,15 +32,19 @@ const RUN = 340;
 const JUMP_MIN = -560;        // tap ≈ 2 tiles
 const JUMP_HOLD = -1600;      // conviction: extra thrust while held
 const HOLD_MAX = 0.34;        // seconds of extra thrust; full hold ≈ 5 tiles
-const FUND_YEARS = 10;
-const SECS_PER_YEAR = 22;     // ~3.7 min fund life
-const CHECK = 10;             // $10M initial check per company
-const FUND_SIZE = 100;        // $100M fund
-const START_RESERVES = 40;    // $40M reserves for follow-ons
-const ROUND_NAMES = ['Seed','Series A','Series B','Series C','Series D','Growth'];
-const ROUND_SIZE = 7;         // term sheets per round before a markup round closes
-const DILUTE = 0.85;          // sprite scale per round
-const FOLLOWON_COST = [0, 2, 4, 7, 11, 16]; // reserves per coin, by round
+// ---- TVPI is the score AND the health bar ---------------------------------
+// One number does both jobs. Term sheets raise it, a Down Round Goomba marks
+// you down, and at zero the company is gone. That is the whole economy.
+const TVPI_START  = 1.00;
+const TVPI_SAFE   = 0.05;
+const TVPI_TERM   = 0.10;
+const TVPI_UNCAP  = 0.50;
+const TVPI_STOMP  = 0.15;   // killing an NPC marks you up — measured worth 3x a SAFE
+const TVPI_BOSS   = 1.00;   // beating the round
+const TVPI_PRORATA= 0.50;   // ownership defended: heals what a down round took
+const DOWN_ROUND  = 0.40;   // what a Down Round Goomba takes off you
+const INVULN_SECS = 1.5;    // mercy window after a down round
+const LIVES = 3;
 
 // ---- the daily fund: one seeded run, same for everyone, share the carnage ----
 function mulberry32(a){a|=0;return function(){a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
@@ -69,34 +73,17 @@ const LP_NAGS = [
 ];
 
 // ---------------------------------------------------------------- the boss
-// TIER 1 VC has no health bar. He has a valuation, and it only goes up.
-// Every hit you land is a bid. You can absolutely beat him. That's the trap.
-const HOT_ENTRY  = 60;    // $60M post if you never bid
-const BID_STEP   = 45;    // what one satisfying stomp costs you
-const HOT_TARGET = 380;   // mark multiplier = HOT_TARGET / post-money
-const DEAL_SECS  = 16;    // a rival is closing this round while you dance
-const BID_TIME   = 4;     // what a bid actually buys: seconds. money -> time.
-const RESERVE_PUSH_COST = 8;   // dry powder spendable in the room...
-const RESERVE_PUSH_SECS = 3;   // ...to hold the rival off. reserves' second sink.
-
-// ---- the mark is not the money -------------------------------------------
-// Paper you BUY with reserves ("hype") inflates TVPI in full and converts to DPI
-// at 15c. So the big number top-left is purchasable, and buying it consumes the
-// exact capital that would have produced real value. One resource, two opposed
-// goals — and the joke is charged rather than captioned.
-const HYPE_CONVERT = 0.15;
-const RAISE_COST = [8, 12, 18, 26, 36, 50];   // reserves to force a round, by round
-const SECONDARY_RATE = 0.5;   // a buyer pays half the MARK — air included
-
-// Published at fund start so bands are aimed at, not fallen into.
+// Bowser in a quarter-zip. Three stomps and he is out of the deal.
+// Graded on the final TVPI, nothing else.
+// the ceiling is ~11.75x if you take every pickup and stomp everything,
+// so the top band has to be earned by looting the sky lane, not just surviving
 const BANDS = [
-  {name:'TOP DECILE',      best:12,  dpi:2.5},
-  {name:'FIRST QUARTILE',  best:7,   dpi:1.5},
-  {name:'SECOND QUARTILE', best:3.5, dpi:0.8},
-  {name:'THIRD QUARTILE',  best:1.5, dpi:0.3},
-  {name:'FOURTH QUARTILE', best:0,   dpi:0},
+  {name:'TOP DECILE',      tvpi:9.5},
+  {name:'FIRST QUARTILE',  tvpi:7.5},
+  {name:'SECOND QUARTILE', tvpi:5.5},
+  {name:'THIRD QUARTILE',  tvpi:3.0},
+  {name:'FOURTH QUARTILE', tvpi:0},
 ];
-const RIVALS = ['APEX PARTNERS','MERIDIAN','NORTHGATE','LATTICE','KESTREL CAPITAL'];
 
 // ---------------------------------------------------------------- boss table
 // Both bosses run the same three-hit state machine; this table re-skins and
@@ -106,13 +93,11 @@ const BOSSES = {
     name: 'TIER 1 VC', pips: 'conviction',
     gold: '#d4af37', accent: '#16203a', ink: '#cfcbdd',
     intro: 'TIER 1 VC is standing in front of the signature.',
-    clockLabel: d => d.rival + ' IS CLOSING THIS ROUND',
     volley: 'OUR PLATFORM TEAM WILL CALL YOU',
     dash: "WE'RE PRE-EMPTING",
     pound: "WE'LL LEAD",
     winded: 'WINDED — FREE HIT',
     beaten: '"Sorry — I have a board thing."',
-    bidLine: (D) => fmtM(D.val) + ' — and ' + D.rival + ' has to wait.',
     loss: { headline: 'RUN OVER BY THE ROUND',
             line: 'they signed it while you were still negotiating.' },
   },
@@ -120,13 +105,11 @@ const BOSSES = {
     name: 'DEBT HOLDERS', pips: 'covenants',
     gold: '#8a8f9c', accent: '#2a2d36', ink: '#b9bcc6',
     intro: 'THE DEBT HOLDERS ARE ALREADY IN THE ROOM.',
-    clockLabel: () => 'MATURITY IN',
     volley: 'COVENANT BREACH',
     dash: 'ACCELERATION CLAUSE',
     pound: 'FORECLOSURE',
     winded: 'WAIVER GRANTED — FREE HIT',
     beaten: '"Fine. We\'ll amend and extend."',
-    bidLine: (D) => fmtM(D.val) + ' of debt — and it sits ahead of you.',
     loss: { headline: 'DEBT HOLDERS TOOK OVER',
             line: 'the equity was worth nothing on the way out.' },
   },
@@ -140,7 +123,6 @@ const HOT_DEALS = [
   {name:'VELLUM',      pitch:'the Figma for litigation'},
   {name:'ARCLIGHT',    pitch:'defense tech, but friendly'},
 ];
-const BID_BARKS = ['COMPETITIVE.','YOU\'RE IN IT.','THEY BLINKED.','MOMENTUM.','CONVICTION.'];
 
 // ---------------------------------------------------------------- audio
 const AC = window.AudioContext ? new AudioContext() : null;
@@ -182,7 +164,7 @@ const LEVEL_ROWS = [
 "............................................======.....======...t...............................s.s............B..................P.....................................",
 "...........................s.s.................................===...t.........................=====..........===...............=====.........t.t.......................",
 "..........................=====.....................................===...t...............................................M..................===........................",
-".....................t.t..............................m..................===...t............................====........=====.............t.............F...............",
+".....................t.t..............................m..................===...t............................====........=====.............t.............t...............",
 "....................====......................................................===........................................................===............................",
 "......CCCCCCCCCC..s.s.........t.t.tg..J.....s.s.s............t.t..........g..p......s....J.............g..p.....t.t.........s.s......g............t.t.t.................",
 "#########################..#############...######....###...################################...######################...#################################################",
@@ -199,7 +181,7 @@ const LEVEL_ROWS_2 = [
 "....................A...................A...........................=====...................A.............................................M.........................................",
 "................................................................t.t...............A...................................P.................======......................................",
 "...........................t.t................................======................................................=====...........................................................",
-"..........................====................s.........................................m.............t...................................................t...............F.........",
+"..........................====................s.........................................m.............t...................................................t...............t.........",
 "............................................=====...................................................=====...............................................=====.......................",
 "............Z...t.t.t...s.s.........t.t.............g.......t.t.t.p.............s.s.t.t.................g.....s.s.s...........t.p...J.......t.t.............g.....t.t.t.............",
 "##############################...#######################...###############....##################...#####################....######################...###############################",
@@ -254,8 +236,8 @@ const LEVELS = {
 // Beating a boss is what advances the world. The fund carousel is unchanged —
 // what changes is which level the next company gets dropped into.
 const WORLDS = [
-  { level: '1-1', boss: 'boss',  secs: 95,  exitMult: 1 },   // seed: small exits
-  { level: '2-1', boss: 'boss2', secs: 110, exitMult: 3 },   // growth: the carry
+  { level: '1-1', boss: 'boss',  secs: 45 },
+  { level: '2-1', boss: 'boss2', secs: 55 },
 ];
 
 let MAP = LEVEL_ROWS, MAP_W = LEVEL_ROWS[0].length, MAP_H = LEVEL_ROWS.length;
@@ -289,60 +271,41 @@ function newRun(runMode) {
   RNG = daily ? mulberry32(DAILY_NUM * 2654435761) : Math.random;
   G = {
     daily,
-    maxLives: daily ? 4 : 10,
-    companies: daily ? 4 : 10,  // lives. every death is a company written off.
-    companyIdx: 1,          // which company we're on (1-based, for flavor)
-    exits: [],              // realized exit values ($M)
-    deadPaper: 0,           // paper value written to zero (for flavor)
-    reserves: daily ? 25 : START_RESERVES,
-    followOnSpent: 0,
-    clock: 0,               // per-world runway, set on company spawn
+    tvpi: TVPI_START,       // the score AND the health bar
+    peak: TVPI_START,       // best it ever got, for the end screen
+    maxLives: LIVES, companies: LIVES,
+    companyIdx: 1,          // which company you're on (1-based, for flavour)
+    clock: 0,               // per-level timer, set on spawn
     toast: null, toastT: 0,
+    banner: null, bannerT: 0,
     nagIdx: 0, nextNag: 30,
     shake: 0,
+    proRata: 0, fees: 0, accel: 0, invuln: 0,   // power-up timers
     mode: 'level',
     levelId: '1-1', mods: {}, world: 0,
-    resolved: 0,            // companies that have exited or died
-    antiPortfolio: [],      // kept for the end screen; currently only flavour
-    signed: false,          // did the current 'exit' come from signing the round?
-    hotIdx: 0,
+    resolved: 0,
+    signed: false,          // did this 'exit' come from beating the boss?
     deal: null,
-    story: [],              // one glyph per outcome — this becomes the share card
+    story: [],              // one glyph per outcome — feeds the share card
     copied: false,
   };
   spawnCompany();
   state = 'play';
 }
 
-function paperTotal() { // live paper marks
-  return G.company ? G.company.paper : 0;
-}
-function deployed() { return CHECK * G.companyIdx + G.followOnSpent; }
-function dpiVal() { return G.exits.reduce((a,b)=>a+b,0) / deployed(); }
-function tvpiVal() {
-  return (G.exits.reduce((a,b)=>a+b,0) + paperTotal()) / deployed();
-}
-function bestExit() { return G.exits.length ? Math.max(...G.exits) : 0; }
-
 function spawnCompany() {
   G.mode = 'level';
   loadLevel(WORLDS[G.world].level);   // the world you're in decides the level
   G.clock = WORLDS[G.world].secs;     // runway resets with every company
   G.nextNag = G.clock * 0.45;
-  G.company = {
-    paper: CHECK,           // $10M in at seed
-    round: 0,               // 0 = seed
-    roundCoins: 0,
-    proRata: 0,             // seconds of coin doubler left
-    fees: 0,                // seconds of 2&20 invincibility
-    accel: 0,               // seconds of AI ACCELERATION left
-    hype: 0,                // portion of the mark that is purchased air
-  };
+  G.proRata = G.fees = G.accel = G.invuln = 0;
   P.x = TILE * 2.5; P.y = TILE * 8; P.vx = 0; P.vy = 0; P.dir = 1;
   P.scale = 1;
   P.onGround = false; P.holdT = 0; P.dead = false;
   cam.x = 0;
   spawnEntities();
+  banner(WORLDS[G.world].level + '  ' + LEVELS[G.levelId].name.toUpperCase());
+  toast('Collect term sheets. Stomp what moves. The round is at the end of the road.', 3.5);
 }
 
 // The end of every level. Your company arrives at its round and the boss is
@@ -352,9 +315,7 @@ function spawnBoss() {
   G.mode = 'boss';
   loadLevel(WORLDS[G.world].boss);
   gateOpen = false;
-  G.deal = { val:HOT_ENTRY, bids:0, free:0,
-             t:DEAL_SECS, t0:DEAL_SECS, hp:3,
-             rival: RIVALS[G.world % RIVALS.length] };
+  G.deal = { hp: 3 };
   P.x = TILE * 4; P.y = TILE * 10; P.vx = 0; P.vy = 0; P.dir = 1;
   P.onGround = true; P.holdT = 0; P.dead = false;
   cam.x = 0;
@@ -362,17 +323,10 @@ function spawnBoss() {
   state = 'bossintro'; stateTimer = 0;
 }
 
-// Signing the round — the flag behind the beaten boss. Bids diluted you:
-// the exit realizes at HOT_ENTRY/val of what it would have been.
+// The flag behind the beaten boss. Signing is the level's reward.
 function signRound() {
-  const C = G.company, D = G.deal;
-  const dilute = HOT_ENTRY / D.val;
-  const stage = WORLDS[G.world].exitMult;
-  const realized = ((C.paper - C.hype) + C.hype * HYPE_CONVERT) * stage * dilute;
-  G.exits.push(realized);
-  G.lastExit = realized; G.lastMark = C.paper * stage; G.lastHype = C.hype * stage;
-  G.lastDilute = dilute;
-  G.story.push({t:'exit', m: realized / CHECK});
+  addTvpi(TVPI_BOSS, P.x, P.y - 40);
+  G.story.push({t:'exit', m: G.tvpi});
   G.resolved++; G.signed = true;
   burst(P.x, P.y - 30, 40, '#59d68f', 320); freeze = 8;
   sfx.exit();
@@ -430,21 +384,30 @@ const NPC = {
       const bty = Math.floor((e.y + e.h/2 + 4)/TILE);
       if (solidFull(tileAt(e.vx<0?etx0:etx1, ety)) ||
           !solidTop(tileAt(e.vx<0?below0:below1, bty))) e.vx *= -1;
-      const b = playerBox(), C = G.company;
+      const b = playerBox();
       if (rectHit(b.x,b.y,b.w,b.h, e.x-e.w/2, e.y-e.h/2, e.w, e.h)) {
         if (P.vy > 150 && b.y + b.h < e.y + 4) {              // stomp
           e.dead = 1; P.vy = -430; sfx.stomp();
           freeze = 4; G.shake = Math.max(G.shake, 0.15);      // impact you can feel
           burst(e.x, e.y, 12, '#ff8da5', 220);
-          C.paper += 1; toast('Restructured the round. +$1M mark.', 1.6);
-        } else if (C.accel > 0 || C.fees > 0) {
-          e.dead = 1; sfx.stomp();          // fees make you invincible to consequences
-          if (C.accel > 0) {                // ...acceleration makes them a speed bump
-            burst(e.x, e.y, 14, '#9ecbff', 240); freeze = 3;
-            G.shake = Math.max(G.shake, 0.12);
-            C.paper += 1; toast('Ran straight through it. +$1M mark.', 1.4);
-          }
-        } else return 'down round';
+          addTvpi(TVPI_STOMP, e.x, e.y - 20);
+        } else if (G.accel > 0 || G.fees > 0) {
+          e.dead = 1; sfx.stomp();          // fees and acceleration walk through it
+          burst(e.x, e.y, 14, '#9ecbff', 240); freeze = 3;
+          G.shake = Math.max(G.shake, 0.12);
+          addTvpi(TVPI_STOMP, e.x, e.y - 20);
+        } else if (G.invuln <= 0) {
+          // a down round marks you down. it does not kill you — running out does.
+          G.invuln = INVULN_SECS;
+          P.vx = (P.x < e.x ? -1 : 1) * 300; P.vy = -300;
+          sfx.denied(); freeze = 5; G.shake = Math.max(G.shake, 0.22);
+          burst(P.x, P.y - 18, 16, '#ff6b81', 240);
+          toast('DOWN ROUND — marked down ' + DOWN_ROUND.toFixed(2) + 'x.', 1.6);
+          if (addTvpi(-DOWN_ROUND, P.x, P.y - 44))
+            return { why: 'marked to zero', override: {
+              headline: 'MARKED TO ZERO',
+              line: 'the down rounds caught up with you.' } };
+        }
       }
     },
     draw(e) {
@@ -481,21 +444,19 @@ const NPC = {
       } else { e.vy += GRAV * 0.8 * dt; }
       e.x += e.vx * dt; e.y += e.vy * dt;
       if (e.y > e.groundY) e.y = e.groundY;
-      const b = playerBox(), C = G.company;
+      const b = playerBox();
       if (rectHit(b.x,b.y,b.w,b.h, e.x-e.w/2, e.y-e.h/2, e.w, e.h)) {
         if (P.vy > 150 && b.y + b.h < e.y + 4) {
           e.dead = 1; P.vy = -430; sfx.stomp();
           freeze = 4; G.shake = Math.max(G.shake, 0.15);
           burst(e.x, e.y, 12, '#c9a2ff', 220);
-          C.paper += 2; toast('Acqui-hired the pivot. +$2M mark.', 1.6);
-        } else if (C.accel > 0 || C.fees > 0) {
+          addTvpi(TVPI_STOMP, e.x, e.y - 20);
+        } else if (G.accel > 0 || G.fees > 0) {
           e.dead = 1; sfx.stomp();
-          if (C.accel > 0) {
-            burst(e.x, e.y, 14, '#9ecbff', 240); freeze = 3;
-            G.shake = Math.max(G.shake, 0.12);
-            C.paper += 1; toast('Ran straight through it. +$1M mark.', 1.4);
-          }
-        } else return 'pivoted into you';
+          burst(e.x, e.y, 14, '#9ecbff', 240); freeze = 3;
+          G.shake = Math.max(G.shake, 0.12);
+          addTvpi(TVPI_STOMP, e.x, e.y - 20);
+        } else return 'pivoted into you';   // this one just kills you
       }
     },
     draw(e) {
@@ -619,9 +580,9 @@ function spawnEntities() {
   ents = [];
   for (let ty = 0; ty < MAP_H; ty++) for (let tx = 0; tx < MAP_W; tx++) {
     const ch = MAP[ty][tx], x = tx*TILE + TILE/2, y = ty*TILE + TILE/2;
-    if (ch === 't') ents.push({t:'coin', kind:'term', x, y, r:10, val:2,  taken:false});
-    if (ch === 's') ents.push({t:'coin', kind:'safe', x, y, r:8,  val:1,  taken:false});
-    if (ch === 'U') ents.push({t:'coin', kind:'uncapped', x, y, r:13, val:12, taken:false});
+    if (ch === 't') ents.push({t:'coin', kind:'term', x, y, r:10, val:TVPI_TERM,  taken:false});
+    if (ch === 's') ents.push({t:'coin', kind:'safe', x, y, r:8,  val:TVPI_SAFE,  taken:false});
+    if (ch === 'U') ents.push({t:'coin', kind:'uncapped', x, y, r:13, val:TVPI_UNCAP, taken:false});
     if (ch === 'B') ents.push({t:'coin', kind:'seat', x, y, r:12, taken:false});
     if (ch === 'P') ents.push({t:'coin', kind:'prorata', x, y, r:11, taken:false});
     if (ch === 'M') ents.push({t:'coin', kind:'fees', x, y, r:11, taken:false});
@@ -644,6 +605,19 @@ function spawnEntities() {
 // ---------------------------------------------------------------- helpers
 function toast(msg, secs) { G.toast = msg; G.toastT = secs || 2.2; }
 function banner(txt) { G.banner = txt; G.bannerT = 1.4; }
+
+// The whole economy. TVPI is the score and the health bar; at zero the company
+// is gone. Returns true if that happened, so callers can bail out of the frame.
+function addTvpi(n, x, y) {
+  G.tvpi = Math.max(0, G.tvpi + n);
+  G.peak = Math.max(G.peak, G.tvpi);
+  if (x !== undefined)
+    ents.push({t:'float', x, y, life: 0.9,
+               txt: (n >= 0 ? '+' : '') + n.toFixed(2) + 'x',
+               col: n >= 0 ? '#ffd75e' : '#ff6b81'});
+  return G.tvpi <= 0;
+}
+function tvpiVal() { return G.tvpi; }
 function fmtM(v) { return '$' + (v>=1000 ? (v/1000).toFixed(1)+'B' : v.toFixed(0)+'M'); }
 function rectHit(ax,ay,aw,ah, bx,by,bw,bh){
   return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
@@ -721,9 +695,10 @@ function update(dt) {
     }
   }
 
-  const C = G.company;
-  if (C) { if (C.proRata > 0) C.proRata -= dt; if (C.fees > 0) C.fees -= dt;
-           if (C.accel > 0) C.accel -= dt; }
+  if (G.proRata > 0) G.proRata -= dt;
+  if (G.fees   > 0) G.fees   -= dt;
+  if (G.accel  > 0) G.accel  -= dt;
+  if (G.invuln > 0) G.invuln -= dt;
   if (G.toastT > 0) { G.toastT -= dt; if (G.toastT <= 0) G.toast = null; }
   if (G.bannerT > 0) { G.bannerT -= dt; if (G.bannerT <= 0) G.banner = null; }
   if (G.shake > 0) G.shake -= dt;
@@ -733,7 +708,7 @@ function update(dt) {
   if (keys.left)  { ax -= 1; P.dir = -1; }
   if (keys.right) { ax += 1; P.dir = 1; }
   // ground momentum: accelerate into a run, skid out of it
-  { const tgt = ax * RUN * (C && C.accel > 0 ? 1.8 : 1),
+  { const tgt = ax * RUN * (G.accel > 0 ? 1.8 : 1),
           rate = (ax === 0 ? 5200 : 3000) * dt;
     P.vx += Math.max(-rate, Math.min(rate, tgt - P.vx)); }
 
@@ -775,42 +750,6 @@ function update(dt) {
 
   // ---- the boss owns the rest of the frame
   if (G.mode === 'boss') return updateBoss(dt);
-
-  // ---- raise a round: buy the big number with the capital that makes the real one
-  if (keys.raise && C) {
-    keys.raise = false;
-    const cost = RAISE_COST[Math.min(C.round, RAISE_COST.length-1)];
-    if (C.round >= ROUND_NAMES.length-1) {
-      sfx.denied(); toast('No one left to mark you up.', 1.8);
-    } else if (G.reserves < cost) {
-      sfx.denied(); toast('NO DRY POWDER — you cannot manufacture a round.', 2.2);
-    } else {
-      G.reserves -= cost; G.followOnSpent += cost;
-      // a 2.5x mark: the number leaps, which is the point. Every cent of it is air.
-      const bump = C.paper * 1.5;
-      C.paper += bump; C.hype += bump;
-      C.round++; C.roundCoins = 0;
-      P.scale *= DILUTE;                   // and you own less of it
-      sfx.markup(); burst(P.x, P.y - 30, 16, '#ffd75e', 240);
-      toast(ROUND_NAMES[C.round] + ' "closed". Marked to ' + fmtM(C.paper) +
-            '. You own less of a bigger number.', 3);
-    }
-  }
-
-  // ---- secondaries: a buyer pays half the MARK, air included. Sometimes right.
-  if (keys.sec && C) {
-    keys.sec = false;
-    const v = C.paper * SECONDARY_RATE;
-    G.exits.push(v);
-    G.story.push({t:'sec'});
-    G.lastExit = v; G.lastMark = C.paper; G.lastHype = C.hype;
-    toast('SECONDARY: sold the mark at ' + (SECONDARY_RATE*100) + '%. ' +
-          fmtM(v) + ' realized.' + (C.hype > (C.paper-C.hype)*1.4
-            ? ' You sold the story before it was marked down.' : ' Coward.'), 3.2);
-    sfx.markup();
-    retireCompany('exit');
-    return;
-  }
 
   // ---- entities
   for (const e of ents) {
@@ -886,32 +825,9 @@ function moveAndCollide(dt) {
 // Three ways out of this room: bid him up, go around him, or walk out the door.
 // Two of them are free. The satisfying one is not.
 function updateBoss(dt) {
-  const D = G.deal;
   if (ents.length > 40) ents = ents.filter(e => !e.gone);
 
-  // Standing off is not a strategy: the founder reads distance as disinterest and
-  // the rival closes faster. Patience has to be played IN the room, not across it —
-  // which is what makes waiting for the opening a skill instead of a wait.
-  const bossRef = ents.find(e => e.t === 'boss');
-  D.dis = !!(bossRef && !bossRef.defeated && Math.abs(P.x - bossRef.x) > 300);
-  D.t -= dt * (D.dis ? 2.6 : 1);
-  if (D.t <= 0) return killCompany('the round closed', BOSS().loss);
-
   const pb = playerBox();
-
-  // reserves get a second use: burn dry powder to slow the rival instead of
-  // spending it on follow-ons later. Now "hold or deploy" weighs two real things.
-  if (keys.sec) {
-    keys.sec = false;
-    if (G.reserves >= RESERVE_PUSH_COST) {
-      G.reserves -= RESERVE_PUSH_COST; G.followOnSpent += RESERVE_PUSH_COST;
-      D.t += RESERVE_PUSH_SECS; D.t0 = Math.max(D.t0, D.t);
-      sfx.seat(); burst(P.x, P.y - 30, 12, '#9ecbff', 200);
-      toast('Burned $' + RESERVE_PUSH_COST + 'M of dry powder. ' + D.rival +
-            ' holds ' + RESERVE_PUSH_SECS + 's.', 2);
-    } else { sfx.denied(); toast('No dry powder left to burn.', 1.6); }
-  }
-
 
   // TIER 1 VC, rebuilt as a real fight: every attack telegraphs, contact while
   // he strolls is a shove (not a death), and the skill is baiting the dash —
@@ -1019,90 +935,50 @@ function updateBoss(dt) {
 // Three hits and he's out. What each hit COSTS is the whole game:
 // catch him winded and it's free; jump on him any other time and you just bid.
 function hitBoss(b) {
-  const D = G.deal;
-  const free = b.mode === 'winded';
-  b.hp--; D.hp = b.hp;
+  b.hp--; G.deal.hp = b.hp;
   b.stun = 0.95; b.vx = (P.x < b.x ? 1 : -1) * 340;
-  b.mode = 'idle'; b.timer = 1.4;      // he recomposes — one free hit per opening
+  b.mode = 'idle'; b.timer = 1.4;
   if (b.y < b.groundY) b.vy = 300;     // knocked out of a pound mid-air
   P.vy = -470; G.shake = 0.18; freeze = 6;
-  burst(b.x, b.y - 60, 18, free ? '#59d68f' : '#ffd75e', 260);
-
-  if (free) {
-    D.free++;
-    sfx.stomp();
-    ents.push({t:'float', x: b.x + 58, y: b.y - 104, txt: 'FREE', life: 1.1, col:'#59d68f'});
-    toast('HE BLINKED. No markup.', 1.6);
-  } else {
-    // paying up buys you time: the founder holds the process open for a bidder
-    D.bids++; D.val += BID_STEP; D.t += BID_TIME; D.t0 = Math.max(D.t0, D.t);
-    sfx.markup();
-    ents.push({t:'float', x: b.x + 58, y: b.y - 104, txt: '+' + fmtM(BID_STEP), life: 1.1});
-    ents.push({t:'float', x: b.x + 58, y: b.y - 132, txt: '+' + BID_TIME + 's', life: 1.1, col:'#9ecbff'});
-    toast(BID_BARKS[(D.bids-1) % BID_BARKS.length] + '  ' + BOSS().bidLine(D), 1.8);
-  }
+  burst(b.x, b.y - 60, 18, '#ffd75e', 260);
+  sfx.stomp();
+  addTvpi(TVPI_STOMP, b.x, b.y - 110);
 
   if (b.hp <= 0) {
     b.defeated = 0.001; gateOpen = true;
     sfx.exit();
-    toast('"We\'re out at this price." THE SIGNING WINDOW IS OPEN.', 3);
+    toast(BOSS().beaten + '  THE SIGNATURE IS OPEN.', 3);
+  } else {
+    toast(b.hp + ' more.', 1.2);
   }
 }
 
 // ---------------------------------------------------------------- economy
 function collect(e) {
-  const C = G.company;
-  if (e.kind === 'seat') {
-    e.taken = true; G.companies++; sfx.seat();
-    toast('BOARD SEAT — one more company in the portfolio.', 2.4); return;
+  e.taken = true;
+  if (e.kind === 'seat') {                       // the 1-UP
+    G.companies++; sfx.seat();
+    toast('BOARD SEAT — one more company in the portfolio.', 2.2); return;
   }
-  if (e.kind === 'prorata') {
-    e.taken = true; C.proRata = 9; P.scale = Math.min(1, P.scale/DILUTE); sfx.seat();
-    toast('PRO RATA — ownership defended. Marks 2x for 9s.', 2.4); return;
+  if (e.kind === 'prorata') {                    // ownership defended: it heals
+    addTvpi(TVPI_PRORATA, e.x, e.y); G.proRata = 9; sfx.seat();
+    toast('PRO RATA — ownership defended.', 2.2); return;
   }
-  if (e.kind === 'fees') {
-    e.taken = true; C.fees = 7; sfx.seat();
-    toast('2 AND 20 — fees keep you alive regardless of performance.', 2.6); return;
+  if (e.kind === 'fees') {                       // the star
+    G.fees = 7; sfx.seat();
+    toast('2 AND 20 — fees keep you alive regardless of performance.', 2.4); return;
   }
   if (e.kind === 'accel') {
-    e.taken = true; C.accel = 9;
-    sfx.markup(); burst(e.x, e.y, 20, '#9ecbff', 260); freeze = 4;
-    banner('AI ACCELERATION');
-    return;
+    G.accel = 9; sfx.markup(); burst(e.x, e.y, 20, '#9ecbff', 260); freeze = 4;
+    banner('AI ACCELERATION'); return;
   }
-  // term sheets / SAFEs: follow-on pricing — later rounds cost reserves per coin
-  const cost = FOLLOWON_COST[Math.min(C.round, FOLLOWON_COST.length-1)];
-  if (cost > 0) {
-    if (G.reserves < cost) {
-      if (!e.denied) { e.denied = true; sfx.denied();
-        toast('NO RESERVES — you cannot follow on. (You blew it at seed.)', 2.6); }
-      return; // coin stays. you just can't have it.
-    }
-    G.reserves -= cost;
-    G.followOnSpent += cost;
-  }
-  e.taken = true;
-  // up rounds mark harder; a hot deal you got cheap marks hardest of all
-  const mult = (C.proRata > 0 ? 2 : 1) * (1 + C.round * 0.6) * (C.mult || 1);
-  C.paper += e.val * mult;
-  C.roundCoins++;
+  // term sheets and SAFEs: the coins
+  addTvpi(e.val, e.x, e.y);
   burst(e.x, e.y, 6, '#ffd75e', 130);
   sfx.coin();
-  if (C.roundCoins >= ROUND_SIZE && C.round < ROUND_NAMES.length-1) {
-    C.round++; C.roundCoins = 0;
-    P.scale *= DILUTE; // dilution
-    sfx.markup();
-    const nextCost = FOLLOWON_COST[Math.min(C.round, FOLLOWON_COST.length-1)];
-    toast(ROUND_NAMES[C.round] + ' closed! Marked up. You own less. ' +
-          'Follow-ons now $' + nextCost + 'M each.', 3);
-  }
 }
 
-// `override` = {headline, line} for deaths that have their own thing to say.
-// Without it a death picks a random pass line, which is the normal case.
 function killCompany(why, override) {
-  const C = G.company;
-  G.deadPaper += C.paper;
   G.companies--; G.resolved++;
   G.story.push({t:'dead'});
   G.lastPass = PASS_LINES[(RNG()*PASS_LINES.length)|0];
@@ -1110,10 +986,6 @@ function killCompany(why, override) {
   G.deathOverride = override || null;
   sfx.death();
   state = 'dead'; stateTimer = 0;
-}
-function retireCompany(mode) {
-  G.companies--; G.resolved++;
-  state = mode; stateTimer = 0;
 }
 function endRun() { state = 'gameover'; stateTimer = 0; }
 
@@ -1127,10 +999,8 @@ function storyEmoji() {
 function shareText() {
   const [q] = grade();
   return 'SUPER CARRY BROS. ' + (G.daily ? '#' + DAILY_NUM : '(free play)') + '\n'
-    + (storyEmoji() || '📭') + '\n'
-    + 'DPI ' + dpiVal().toFixed(2) + 'x · ' + q + '\n'
-    + (G.exits.length ? 'best exit ' + fmtM(bestExit()) + ' ('
-        + (bestExit()/CHECK).toFixed(1) + 'x)\n' : '')
+    + (storyEmoji() || '\u{1F4ED}') + '\n'
+    + 'TVPI ' + G.tvpi.toFixed(2) + 'x · ' + q + '\n'
     + SITE_URL;
 }
 function copyShare() {
@@ -1151,18 +1021,10 @@ const BAND_TAG = {
   'FOURTH QUARTILE': 'Your TVPI was beautiful. Nobody could eat it.',
 };
 // Bands are published (see BANDS) so the player can aim at one mid-run.
-function bandFor(best, dpi) {
-  return BANDS.find(b => best >= b.best && dpi >= b.dpi) || BANDS[BANDS.length-1];
-}
+function bandFor(tv) { return BANDS.find(b => tv >= b.tvpi) || BANDS[BANDS.length-1]; }
 function grade() {
-  const b = bandFor(bestExit()/CHECK, dpiVal());
+  const b = bandFor(G.tvpi);
   return [b.name, BAND_TAG[b.name]];
-}
-// the band immediately above where you currently sit, for the HUD pace line
-function nextBand() {
-  const cur = bandFor(bestExit()/CHECK, dpiVal());
-  const i = BANDS.indexOf(cur);
-  return i > 0 ? BANDS[i-1] : null;
 }
 
 // ---------------------------------------------------------------- render
@@ -1202,25 +1064,18 @@ function render(dt) {
 function drawBossIntro() {
   ctx.fillStyle = 'rgba(13,15,26,0.88)'; ctx.fillRect(0,0,W,H);
   ctx.textAlign = 'center';
-  ctx.fillStyle = bossKind()==='debt' ? '#c0455a' : '#ffd75e'; ctx.font = 'bold 32px monospace';
-  ctx.fillText(bossKind()==='debt' ? 'THE RECAP' : 'THE ROUND', W/2, H/2 - 82);
-  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 19px monospace';
-  ctx.fillText('Your company made it to the signature.', W/2, H/2 - 44);
-  ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 17px monospace';
-  ctx.fillText(BOSS().intro, W/2, H/2 - 12);
-  // the objective, in one box
+  ctx.fillStyle = bossKind()==='debt' ? '#c0455a' : '#ffd75e'; ctx.font = 'bold 34px monospace';
+  ctx.fillText(bossKind()==='debt' ? 'THE RECAP' : 'THE ROUND', W/2, H/2 - 66);
+  ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 18px monospace';
+  ctx.fillText(BOSS().intro, W/2, H/2 - 24);
   ctx.strokeStyle = '#584d78'; ctx.lineWidth = 1;
-  ctx.strokeRect(W/2 - 300, H/2 + 8, 600, 96);
-  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 14px monospace';
-  ctx.fillText('OBJECTIVE: knock him out of the deal — 3 hits — then sign behind him.', W/2, H/2 + 32);
-  ctx.fillStyle = '#59d68f'; ctx.font = '13px monospace';
-  ctx.fillText('Hits while ' + BOSS().winded.split(' — ')[0] + ' are FREE.', W/2, H/2 + 56);
-  ctx.fillStyle = '#ffd75e';
-  ctx.fillText('Any other hit is a bid: +' + fmtM(BID_STEP) + ' on the price, paid out of YOUR exit.',
-               W/2, H/2 + 78);
+  ctx.strokeRect(W/2 - 260, H/2, 520, 74);
+  ctx.fillStyle = '#e8e6f0'; ctx.font = 'bold 20px monospace';
+  ctx.fillText('OBJECTIVE:  3 STOMPS', W/2, H/2 + 30);
   ctx.fillStyle = '#6a677f'; ctx.font = '13px monospace';
-  ctx.fillText((bossKind()==='debt' ? 'The note matures in ' : G.deal.rival + ' signs in ') +
-               DEAL_SECS + 's. Lose the room, lose the company.', W/2, H/2 + 124);
+  ctx.fillText('Jump on his head three times, then sign behind him.', W/2, H/2 + 56);
+  ctx.fillStyle = '#ff6b81';
+  ctx.fillText('Everything he throws kills you.', W/2, H/2 + 100);
 }
 
 function theme() { return (G && G.mods && G.mods.theme) || 'night'; }
@@ -1509,7 +1364,7 @@ function drawEnts() {
 function drawPlayer() {
   const s = P.scale;
   // AI ACCELERATION: three fading afterimages trailing the sprite
-  if (G.company && G.company.accel > 0) {
+  if (G.accel > 0) {
     for (let i = 3; i >= 1; i--) {
       ctx.save();
       ctx.globalAlpha = 0.10 * i;
@@ -1533,7 +1388,7 @@ function drawPlayer() {
   ctx.fillStyle = '#f0ede4'; ctx.fillRect(-9,-1,8,3); ctx.fillRect(1,-1,8,3); // allbirds
   // face
   ctx.fillStyle = '#1a1a22'; ctx.fillRect(2,-31,2,2);
-  if (G.company && G.company.fees > 0) { // fee halo
+  if (G.fees > 0 || G.invuln > 0) { // fee halo / mercy flash
     ctx.strokeStyle = 'rgba(255,141,177,0.7)'; ctx.lineWidth = 2;
     ctx.strokeRect(-12,-38,24,42);
   }
@@ -1542,28 +1397,45 @@ function drawPlayer() {
 
 // ---------------------------------------------------------------- HUD
 function drawHUD() {
-  const C = G.company;
   ctx.textAlign = 'left';
 
-  // TVPI — huge, glorious, fake
-  const tv = tvpiVal();
-  ctx.font = 'bold 34px monospace';
-  ctx.fillStyle = tv >= 1 ? '#59d68f' : '#e8e6f0';
-  ctx.fillText('TVPI ' + tv.toFixed(2) + 'x', 20, 44);
-  // DPI — small, honest
-  const dp = dpiVal();
-  ctx.font = '13px monospace';
-  ctx.fillStyle = dp > 0 ? '#9ecbff' : '#6a677f';
-  ctx.fillText('DPI ' + dp.toFixed(2) + 'x' + (dp === 0 ? '  (this is the real one)' : ''), 22, 64);
+  // TVPI — the score and the health bar, one number
+  const tv = G.tvpi;
+  const col = tv <= 0.6 ? '#ff6b81' : tv >= 1 ? '#59d68f' : '#ffd75e';
+  ctx.font = 'bold 40px monospace';
+  ctx.fillStyle = col;
+  ctx.fillText('TVPI ' + tv.toFixed(2) + 'x', 20, 48);
+  // the bar underneath makes it read as health without ever saying "health"
+  ctx.fillStyle = '#2b2840'; ctx.fillRect(22, 58, 220, 9);
+  ctx.fillStyle = col; ctx.fillRect(22, 58, 220 * Math.min(1, tv / 3), 9);
+  if (tv <= 0.6) {
+    ctx.font = 'bold 11px monospace'; ctx.fillStyle = '#ff6b81';
+    ctx.fillText('ONE MORE DOWN ROUND AND THE COMPANY IS GONE', 22, 82);
+  }
 
-  // AI ACCELERATION pill with a draining bar
-  if (C && C.accel > 0) {
+  // lives
+  ctx.font = '12px monospace'; ctx.fillStyle = '#b8b4cc';
+  ctx.fillText('PORTFOLIO', 20, 106);
+  for (let i = 0; i < G.maxLives; i++) {
+    const alive = i < G.companies;
+    ctx.fillStyle = alive ? '#59d68f' : '#43405c';
+    ctx.beginPath(); ctx.arc(102 + i*18, 102, 6, 0, 7); ctx.fill();
+    if (!alive) { ctx.strokeStyle='#2b2840'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(97+i*18,97); ctx.lineTo(107+i*18,107);
+      ctx.moveTo(107+i*18,97); ctx.lineTo(97+i*18,107); ctx.stroke(); }
+  }
+
+  // active power-up pill
+  const pu = G.accel > 0 ? ['AI ACCELERATION', G.accel, 9, '#9ecbff']
+           : G.fees  > 0 ? ['2 AND 20 — INVINCIBLE', G.fees, 7, '#ff8db1']
+           : G.proRata > 0 ? ['PRO RATA', G.proRata, 9, '#9ecbff'] : null;
+  if (pu) {
     ctx.fillStyle = 'rgba(29,43,63,0.9)'; ctx.fillRect(W/2-110, 30, 220, 30);
-    ctx.strokeStyle = '#9ecbff'; ctx.lineWidth = 2; ctx.strokeRect(W/2-110, 30, 220, 30);
-    ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#9ecbff'; ctx.textAlign = 'center';
-    ctx.fillText('AI ACCELERATION', W/2, 45);
+    ctx.strokeStyle = pu[3]; ctx.lineWidth = 2; ctx.strokeRect(W/2-110, 30, 220, 30);
+    ctx.font = 'bold 13px monospace'; ctx.fillStyle = pu[3]; ctx.textAlign = 'center';
+    ctx.fillText(pu[0], W/2, 45);
     ctx.fillStyle = '#2b2840'; ctx.fillRect(W/2-100, 50, 200, 5);
-    ctx.fillStyle = '#9ecbff'; ctx.fillRect(W/2-100, 50, 200 * Math.min(1, C.accel/9), 5);
+    ctx.fillStyle = pu[3]; ctx.fillRect(W/2-100, 50, 200 * Math.min(1, pu[1]/pu[2]), 5);
     ctx.textAlign = 'left';
   }
   // the pickup moment: huge, centre-screen, scaling in
@@ -1579,45 +1451,10 @@ function drawHUD() {
     ctx.textAlign = 'left';
   }
 
-  // portfolio dots
-  ctx.font = '12px monospace'; ctx.fillStyle = '#b8b4cc';
-  ctx.fillText('PORTFOLIO', 20, 90);
-  for (let i = 0; i < G.maxLives; i++) {
-    const alive = i < G.companies;
-    ctx.fillStyle = alive ? '#59d68f' : '#43405c';
-    ctx.beginPath(); ctx.arc(100 + i*16, 86, 5, 0, 7); ctx.fill();
-    if (!alive) { ctx.strokeStyle='#2b2840'; ctx.lineWidth=1.5;
-      ctx.beginPath(); ctx.moveTo(96+i*16,82); ctx.lineTo(104+i*16,90);
-      ctx.moveTo(104+i*16,82); ctx.lineTo(96+i*16,90); ctx.stroke(); }
-  }
-
-  // reserves + current company
-  ctx.fillStyle = '#b8b4cc'; ctx.font = '12px monospace';
-  ctx.fillText('RESERVES ' + fmtM(G.reserves), 20, 112);
-  if (C) {
-    ctx.fillText('CO. #' + G.companyIdx + '  ' + (C.hot ? C.hot + '  ' : '') +
-      ROUND_NAMES[C.round] +
-      '  mark ' + fmtM(C.paper) + (C.proRata>0?'  [PRO RATA]':''), 20, 130);
-    // how much of that mark is air, and what it converts to
-    const air = C.hype / Math.max(1, C.paper);
-    const cost = RAISE_COST[Math.min(C.round, RAISE_COST.length-1)];
-    if (C.hype > 0) {
-      ctx.fillStyle = air > 0.5 ? '#ff6b81' : '#ffd75e'; ctx.font = '11px monospace';
-      ctx.fillText('  ' + (air*100).toFixed(0) + '% of that is paper → exits at ' +
-                   fmtM((C.paper - C.hype) + C.hype*HYPE_CONVERT), 20, 146);
-    }
-    ctx.font = '11px monospace';
-    ctx.fillStyle = G.reserves >= cost ? '#9ecbff' : '#3d3a52';
-    ctx.fillText('[R] raise a round — ' + fmtM(cost) + ' of reserves', 20, C.hype > 0 ? 162 : 148);
-  } else {
-    ctx.fillStyle = '#ffd75e'; ctx.fillText('IN A PROCESS', 20, 130);
-  }
-
-  // world + runway — top right. the runway is this company's life expectancy.
+  // world + timer, top right
   const wsecs = WORLDS[G.world].secs, rfrac = Math.max(0, G.clock / wsecs);
   ctx.textAlign = 'right';
-  ctx.font = 'bold 18px monospace';
-  ctx.fillStyle = '#b8b4cc';
+  ctx.font = 'bold 18px monospace'; ctx.fillStyle = '#b8b4cc';
   ctx.fillText((G.daily ? 'DAILY #' + DAILY_NUM + ' · ' : '') +
     'WORLD ' + WORLDS[G.world].level + ' · ' + LEVELS[G.levelId].name.toUpperCase(), W-20, 38);
   if (G.mode === 'level') {
@@ -1628,90 +1465,37 @@ function drawHUD() {
     ctx.fillStyle = rfrac < 0.25 ? '#ff6b81' : '#59d68f';
     ctx.fillRect(W-220, 48, 200 * Math.min(1, rfrac), 8);
   }
-  ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
+
+  // the boss: three pips, nothing else
   if (G.mode === 'boss') {
-    ctx.fillStyle = G.reserves >= RESERVE_PUSH_COST ? '#9ecbff' : '#3d3a52';
-    ctx.fillText('[X] burn $' + RESERVE_PUSH_COST + 'M dry powder → hold them ' +
-                 RESERVE_PUSH_SECS + 's', W-20, 72);
-    ctx.fillStyle = '#ff6b81';
-    ctx.fillText('no door. no pass. through him.', W-20, 90);
-  } else {
-    ctx.fillText('best exit: ' + (G.exits.length ? fmtM(bestExit()) : '—'), W-20, 72);
-    ctx.fillText('[X] secondary — sells the MARK at ' + (SECONDARY_RATE*100) + '%', W-20, 90);
-  }
-
-  // published bands: what you are on pace for, and what the next one costs
-  {
-    const cur = bandFor(bestExit()/CHECK, dpiVal()), nb = nextBand();
-    ctx.textAlign = 'right'; ctx.font = 'bold 12px monospace';
-    ctx.fillStyle = '#b8b4cc';
-    ctx.fillText('ON PACE: ' + cur.name, W-20, 118);
-    if (nb) {
-      const needBest = nb.best*CHECK, needDpi = nb.dpi;
-      ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
-      ctx.fillText(nb.name + ' needs one exit ≥ ' + fmtM(needBest) +
-                   ' and DPI ' + needDpi.toFixed(1) + 'x', W-20, 134);
-      ctx.fillText('you: ' + fmtM(bestExit()) + ' · DPI ' + dpiVal().toFixed(2) + 'x', W-20, 148);
-    }
-  }
-
-  // the boss meter: it fills instead of emptying, because it is the price
-  if (G.mode === 'boss') {
-    const D = G.deal;
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 12px monospace'; ctx.fillStyle = '#b8b4cc';
-    ctx.fillText(bossKind()==='debt' ? 'THE RECAP' : 'THE HOT DEAL', W/2, 106);
-    const frac = Math.min(1, (D.val - HOT_ENTRY) / (420 - HOT_ENTRY));
-    ctx.fillStyle = '#2b2840'; ctx.fillRect(W/2-170, 114, 340, 13);
-    ctx.fillStyle = D.val > 240 ? '#ff6b81' : BOSS().gold;
-    ctx.fillRect(W/2-170, 114, 340*frac, 13);
-    ctx.strokeStyle = '#584d78'; ctx.lineWidth = 1; ctx.strokeRect(W/2-170, 114, 340, 13);
-    ctx.font = 'bold 17px monospace'; ctx.fillStyle = '#ffd75e';
-    ctx.fillText((bossKind()==='debt' ? 'DEBT AHEAD OF YOU ' : 'POST-MONEY ') + fmtM(D.val), W/2, 146);
-    ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
-    ctx.fillText(bossKind()==='debt'
-      ? 'it all pays out before your ' + (CHECK/D.val*100).toFixed(1) + '%'
-      : 'your $10M buys ' + (CHECK/D.val*100).toFixed(1) + '%', W/2, 162);
-
-    // the rival closing the round: the thing your money actually buys off
-    const rf = Math.max(0, Math.min(1, D.t / D.t0));
-    const urgent = D.t < 7;
-    ctx.font = 'bold 11px monospace';
-    ctx.fillStyle = D.dis ? '#ff6b81' : urgent ? '#ff6b81' : '#b8b4cc';
-    ctx.fillText(BOSS().clockLabel(D) + ' — ' + Math.ceil(D.t) + 's' +
-                 (D.dis ? '   ⚠ YOU LOOK DISINTERESTED (2.6x)' : ''), W/2, 186);
-    ctx.fillStyle = '#2b2840'; ctx.fillRect(W/2-170, 192, 340, 9);
-    ctx.fillStyle = (urgent || D.dis) ? '#ff6b81' : '#9ecbff';
-    ctx.fillRect(W/2-170, 192, 340*rf, 9);
-    ctx.strokeStyle = '#584d78'; ctx.lineWidth = 1; ctx.strokeRect(W/2-170, 192, 340, 9);
-    // his conviction: three hits and he walks
     const bs = ents.find(e => e.t === 'boss');
     const hp = bs ? Math.max(0, bs.hp) : 0;
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 13px monospace'; ctx.fillStyle = BOSS().gold;
+    ctx.fillText(BOSS().name, W/2, 106);
     ctx.font = '11px monospace'; ctx.fillStyle = '#6a677f';
-    ctx.fillText(bossKind()==='debt' ? 'THEIR COVENANTS' : 'HIS CONVICTION', W/2 - 46, 180);
+    ctx.fillText(BOSS().pips.toUpperCase(), W/2 - 56, 131);
     for (let i = 0; i < 3; i++) {
       ctx.fillStyle = i < hp ? '#ff6b81' : '#39304a';
-      ctx.beginPath(); ctx.arc(W/2 + 22 + i*16, 176, 5, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(W/2 + 6 + i*18, 126, 6, 0, 7); ctx.fill();
     }
   }
 
   // toast
   if (G.toast) {
-    ctx.textAlign = 'center'; ctx.font = 'bold 15px monospace';
-    const tw = ctx.measureText(G.toast).width + 30;
-    ctx.fillStyle = 'rgba(13,15,26,0.85)';
-    ctx.fillRect(W/2 - tw/2, H-78, tw, 34);
+    ctx.textAlign = 'center'; ctx.font = 'bold 14px monospace';
+    const tw = ctx.measureText(G.toast).width + 28;
+    ctx.fillStyle = 'rgba(13,15,26,0.85)'; ctx.fillRect(W/2 - tw/2, H-78, tw, 34);
     ctx.fillStyle = '#ffd75e';
     ctx.fillText(G.toast, W/2, H-56);
   }
 }
-
 function drawDeathCard() {
   const O = G.deathOverride;
   ctx.fillStyle = 'rgba(13,15,26,0.82)'; ctx.fillRect(0,0,W,H);
   ctx.textAlign = 'center';
   ctx.fillStyle = O ? '#ff6b81' : '#e8e6f0'; ctx.font = 'bold 26px monospace';
-  ctx.fillText(O ? O.headline : 'COMPANY #' + G.companyIdx + ' — MARKED TO ZERO',
+  ctx.fillText(O ? O.headline : 'COMPANY #' + G.companyIdx + ' — WRITTEN OFF',
                W/2, H/2 - 40);
   ctx.font = '17px monospace'; ctx.fillStyle = '#b8b4cc';
   ctx.fillText(O ? O.line : G.lastPass, W/2, H/2 + 4);
@@ -1721,59 +1505,46 @@ function drawDeathCard() {
 }
 
 function drawExitCard() {
-  const got = G.exits[G.exits.length-1];
-  const mark = G.lastMark || got, hype = G.lastHype || 0;
-  const lost = mark - got;
   ctx.fillStyle = 'rgba(13,15,26,0.82)'; ctx.fillRect(0,0,W,H);
   ctx.textAlign = 'center';
-  // the mark first, big and green — then what actually cleared
-  ctx.fillStyle = '#6a677f'; ctx.font = '16px monospace';
-  ctx.fillText('MARKED AT ' + fmtM(mark), W/2, H/2 - 66);
-  ctx.fillStyle = '#59d68f'; ctx.font = 'bold 32px monospace';
-  ctx.fillText('REALIZED ' + fmtM(got), W/2, H/2 - 26);
-  if (G.signed && G.lastDilute < 0.999) {
-    ctx.fillStyle = '#ffd75e'; ctx.font = 'bold 13px monospace';
-    ctx.fillText('your bids cost you ' + ((1-G.lastDilute)*100).toFixed(0) +
-                 '% of this exit', W/2, H/2 - 92);
-  }
-  if (lost > 0.5) {
-    ctx.fillStyle = '#ff6b81'; ctx.font = 'bold 14px monospace';
-    ctx.fillText('— ' + fmtM(lost) + ' of paper did not convert' +
-                 (hype > 0 ? ' (you bought ' + fmtM(hype) + ' of it)' : ''), W/2, H/2 + 6);
-  } else {
-    ctx.font = '15px monospace'; ctx.fillStyle = '#e8e6f0';
-    ctx.fillText('Actual cash. DPI moves. LPs feel something.', W/2, H/2 + 6);
-  }
-  ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
-  ctx.fillText((bestExit() === got ? 'New best exit. ' : '') +
-    'Only your best one counts.', W/2, H/2 + 38);
+  ctx.fillStyle = '#59d68f'; ctx.font = 'bold 34px monospace';
+  ctx.fillText('ROUND SIGNED', W/2, H/2 - 34);
+  ctx.font = '16px monospace'; ctx.fillStyle = '#e8e6f0';
+  ctx.fillText(BOSS().name + ' is out of the deal.', W/2, H/2 + 4);
+  ctx.font = 'bold 22px monospace'; ctx.fillStyle = '#ffd75e';
+  ctx.fillText('TVPI ' + G.tvpi.toFixed(2) + 'x', W/2, H/2 + 44);
 }
 
-// ---------------------------------------------------------------- screens
 function renderTitle() {
-  ctx.fillStyle = '#0d0f1a'; ctx.fillRect(0,0,W,H);
   const t = performance.now()/1000;
+  ctx.save();
+  ctx.fillStyle = '#0d0f1a'; ctx.fillRect(0,0,W,H);
   ctx.textAlign = 'center';
-  ctx.font = 'bold 52px monospace';
-  ctx.fillStyle = '#59d68f';
-  ctx.fillText('SUPER CARRY BROS.', W/2, 150 + Math.sin(t*2)*4);
-  ctx.font = '16px monospace'; ctx.fillStyle = '#b8b4cc';
-  ctx.fillText('A power-law platformer. Nine of your companies are supposed to die.', W/2, 195);
-  ctx.fillStyle = '#e8e6f0'; ctx.font = '14px monospace';
-  const lines = [
-    '←/→ or A/D ......... move',
-    'SPACE (hold) ....... conviction jump — bigger check, harder landing',
-    'X .................. secondary sale (cash out at 50%, forever ashamed)',
-    '',
-    'Collect term sheets to mark up your company. Reach the IPO flag to',
-    'realize it. TVPI is the big number. DPI is the only number.',
+  ctx.fillStyle = '#59d68f'; ctx.font = 'bold 52px monospace';
+  ctx.fillText('SUPER CARRY BROS.', W/2, 140 + Math.sin(t*1.6)*4);
+  ctx.fillStyle = '#b8b4cc'; ctx.font = '15px monospace';
+  ctx.fillText('A power-law platformer. Three companies. One number.', W/2, 182);
+
+  ctx.font = '14px monospace'; ctx.textAlign = 'left';
+  const L = [
+    ['#ffd75e', 'TVPI is your score AND your health.'],
+    ['#b8b4cc', '   term sheets .......... TVPI up'],
+    ['#b8b4cc', '   stomp an NPC ......... TVPI up'],
+    ['#ff6b81', '   Down Round Goomba .... TVPI DOWN'],
+    ['#ff6b81', '   TVPI hits zero ....... company gone'],
+    ['#6a677f', ''],
+    ['#b8b4cc', '   Serial Pivots and anchors kill on contact.'],
+    ['#b8b4cc', '   Every level ends with a boss. Three stomps.'],
   ];
-  lines.forEach((l,i)=>ctx.fillText(l, W/2, 260 + i*24));
+  L.forEach(([c, txt], i) => { ctx.fillStyle = c; ctx.fillText(txt, W/2 - 215, 235 + i*25); });
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#6a677f'; ctx.font = '13px monospace';
+  ctx.fillText('\u2190/\u2192 move   \u00b7   SPACE (hold) conviction jump', W/2, 455);
   ctx.fillStyle = Math.sin(t*5)>0 ? '#ffd75e' : '#6a677f';
-  ctx.font = 'bold 18px monospace';
-  ctx.fillText('[ENTER] THE DAILY FUND #' + DAILY_NUM + ' — 4 companies, 2 min, same for everyone', W/2, 440);
-  ctx.fillStyle = '#b8b4cc'; ctx.font = '14px monospace';
-  ctx.fillText('[SPACE] full 10-year fund    ·    [B] straight to the hot deal', W/2, 470);
+  ctx.font = 'bold 17px monospace';
+  ctx.fillText('[SPACE] START   \u00b7   [ENTER] DAILY #' + DAILY_NUM +
+               '   \u00b7   [B] BOSS', W/2, 495);
   ctx.restore();
 }
 
@@ -1786,18 +1557,11 @@ function renderComplete() {
   ctx.fillText('YOU RETURNED THE FUND', W/2, 110);
   ctx.font = '15px monospace'; ctx.fillStyle = '#b8b4cc';
   ctx.fillText('Every round signed. The LPs got actual money. Nobody believes you.', W/2, 142);
-  const tv = tvpiVal(), dp = dpiVal();
-  ctx.font = 'bold 40px monospace';
-  ctx.fillStyle = '#6a677f';
-  ctx.fillText('TVPI ' + tv.toFixed(2) + 'x', W/2 - 180, 210);
-  ctx.fillStyle = dp >= 1 ? '#59d68f' : '#ff6b81';
-  ctx.fillText('DPI ' + dp.toFixed(2) + 'x', W/2 + 180, 210);
-  ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
-  ctx.fillText('(paper)', W/2 - 180, 235);
-  ctx.fillText('(what LPs can eat)', W/2 + 180, 235);
+  ctx.font = 'bold 52px monospace'; ctx.fillStyle = '#59d68f';
+  ctx.fillText('TVPI ' + G.tvpi.toFixed(2) + 'x', W/2, 220);
   ctx.font = '15px monospace'; ctx.fillStyle = '#e8e6f0';
-  ctx.fillText('Best exit: ' + fmtM(bestExit()) + '   Companies burned: ' +
-    (G.maxLives - G.companies) + ' of ' + G.maxLives, W/2, 280);
+  ctx.fillText('Peak ' + G.peak.toFixed(2) + 'x   ·   Companies burned: ' +
+    (G.maxLives - G.companies) + ' of ' + G.maxLives, W/2, 260);
   ctx.font = 'bold 34px monospace'; ctx.fillStyle = '#ffd75e';
   ctx.fillText(q, W/2, 340);
   ctx.font = '16px monospace'; ctx.fillStyle = '#b8b4cc';
@@ -1824,31 +1588,20 @@ function renderGameOver() {
 
 
   // the reveal: TVPI vs DPI, side by side
-  const tv = tvpiVal(), dp = dpiVal();
-  ctx.font = 'bold 40px monospace';
-  ctx.fillStyle = '#6a677f';
-  ctx.fillText('TVPI ' + tv.toFixed(2) + 'x', W/2 - 180, 170);
-  ctx.fillStyle = dp >= 1 ? '#59d68f' : '#ff6b81';
-  ctx.fillText('DPI ' + dp.toFixed(2) + 'x', W/2 + 180, 170);
-  ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
-  ctx.fillText('(paper)', W/2 - 180, 195);
-  ctx.fillText('(what LPs can eat)', W/2 + 180, 195);
-
+  ctx.font = 'bold 52px monospace'; ctx.fillStyle = G.tvpi >= 1 ? '#59d68f' : '#ff6b81';
+  ctx.fillText('TVPI ' + G.tvpi.toFixed(2) + 'x', W/2, 180);
   ctx.font = '15px monospace'; ctx.fillStyle = '#e8e6f0';
-  ctx.fillText('Best exit: ' + (G.exits.length ? fmtM(bestExit()) : 'none') +
-    '   Exits: ' + G.exits.length + '   Written off: ' + fmtM(G.deadPaper), W/2, 245);
+  ctx.fillText('Peak ' + G.peak.toFixed(2) + 'x   ·   all ' + G.maxLives +
+    ' companies written off', W/2, 225);
 
   ctx.font = 'bold 34px monospace'; ctx.fillStyle = '#ffd75e';
   ctx.fillText(q, W/2, 310);
   ctx.font = '16px monospace'; ctx.fillStyle = '#b8b4cc';
   ctx.fillText(tag, W/2, 345);
 
-  // the ones you didn't get. they did fine.
-  if (G.antiPortfolio.length) {
-    const w = G.antiPortfolio.reduce((a,b) => b.mark > a.mark ? b : a);
-    ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
-    ctx.fillText('ANTI-PORTFOLIO: ' + w.name + ' last marked at ' + fmtM(w.mark) + '.', W/2, 385);
-  }
+  ctx.font = '13px monospace'; ctx.fillStyle = '#6a677f';
+  ctx.fillText('Reached ' + WORLDS[G.world].level + ' — ' +
+               LEVELS[WORLDS[G.world].level].name + '.', W/2, 385);
 
   // the share card: the run as a pasteable artifact
   ctx.font = '22px monospace';
