@@ -1624,11 +1624,9 @@ addEventListener('keydown', e => {
   if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
     keys.jump = true; keys.action = true; e.preventDefault();
   }
-  if (e.code === 'KeyX') keys.sec = true;
   if (e.code === 'KeyB') keys.boss = true;
   if (e.code === 'Enter') keys.daily = true;
   if (e.code === 'KeyC') keys.copy = true;
-  if (e.code === 'KeyR') keys.raise = true;
 });
 addEventListener('keyup', e => {
   if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;

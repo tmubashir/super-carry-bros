@@ -1,258 +1,186 @@
 # Super Carry Bros. — handoff brief
 
-Context for a fresh session. Everything here is measured, not assumed.
+Context for a fresh session on a new machine. Everything here is measured, not
+assumed, and matches the shipped `index.html` as of the "Strip back to Mario"
+commit.
 
 ---
 
 ## 1. What this is
 
-A VC-themed Mario-style side-scroller. You run a $100M seed fund. You start with
-ten portfolio companies and **nine of them are supposed to die**.
+Mario, but you are a VC. Three portfolio companies are your lives, term sheets
+are your coins, and the joke is carried by the mechanics rather than the labels.
 
-The design rule that makes it not a normal platformer:
-
-> **Your score is your single best exit, not the sum of what you collected.**
-> Losing companies is survivable. Whiffing the breakout is fatal.
-
-Secondary joke: **TVPI vs DPI.** TVPI is the enormous number top-left and it
-climbs on every pickup. DPI is the small grey one underneath. The end screen
-grades you on the small grey one, as a fund quartile.
+**The one rule: TVPI is your score and your health at the same time.** Sonic's
+rings in a quarter-zip.
 
 Live: <https://tmubashir.github.io/super-carry-bros/>
 Repo: `tmubashir/super-carry-bros` (public, GitHub Pages off `main`)
 
 ---
 
-## 2. Layout
-
-| File | What |
-|---|---|
-| `index.html` | The entire game. Single file, canvas, zero dependencies, no build step. |
-| `harness.html` | Automated playtester. Loads the real game and measures whether it's fun. |
-| `README.md` | Player-facing. Controls + the joke. |
-| `.claude/launch.json` | Dev server (`python3 -m http.server 8777`). |
-
-Run locally:
+## 2. Setup on a new machine
 
 ```bash
-cd /Users/tahamubashir/super_carry && python3 -m http.server 8777
+git clone https://github.com/tmubashir/super-carry-bros.git
+cd super-carry-bros
+git config --global user.email "tmubashir@users.noreply.github.com"
+python3 -m http.server 8777
 ```
 
-Then `http://localhost:8777/index.html` and `http://localhost:8777/harness.html`.
+`localhost:8777/index.html` to play, `localhost:8777/harness.html` to run the
+suite. `.claude/launch.json` is gitignored, so the dev-server shortcut has to be
+recreated locally if you want it — the command above is the whole dependency.
 
-**Deploy = push.** Pages rebuilds in ~60s. Always verify after:
+**Deploy = push.** Pages rebuilds in ~60s. Always hash-verify after:
 
 ```bash
 curl -s https://tmubashir.github.io/super-carry-bros/ | shasum -a 256
+shasum -a 256 index.html
 ```
 
 ---
 
-## 3. Controls
+## 3. Layout
 
-`←/→` move · `Space` (hold) conviction jump · `Enter` Daily Fund · `B` skip to
-the boss · `X` secondary sale / burn dry powder in the boss room · `C` copy
-share card on the end screen.
-
----
-
-## 4. What is built
-
-**Level 1-1 Demo Day** — bounce pads that launch you into sky routes, a
-patrolling BRIDGE ROUND moving platform, Serial Pivot enemies that lunge and
-rebrand mid-air (AI→B2B→D2C→WEB3), a founder conveyor, uncapped SAFEs up high.
-168 tiles wide.
-
-**The Tier 1 VC boss.** No health bar — a post-money that only goes up. Attacks
-telegraph with a `!`, chosen by distance: volley (far) / dash (mid) / ground
-pound (close). Each leaves a **winded** window. Bait the dash into a wall for a
-long free-hit opening. Strolling contact **shoves** rather than kills; deaths
-come only from attacks. 3 conviction pips, phases speed up as they drop.
-
-The decision it exists to pose:
-- **Free hits** (winded window) → cheap entry, 16.7% ownership, needs execution
-- **Bids** (impatient stomps) → +$45M post AND +4s on the rival clock. Money buys time.
-- **Standing off** → the founder reads distance as disinterest; the rival closes
-  2.6× faster beyond 300px. Punished outright.
-- **Dry powder** → `X` burns $8M reserves to hold the rival 3s.
-- **The door** → stand still in it to pass. Goes to the anti-portfolio.
-
-**Economy** — dilution shrinks your sprite each round, pro rata restores it,
-reserves gate follow-ons at rising cost, 10-year fund clock, LP nags,
-anti-portfolio sting on the end screen.
-
-**Virality layer** — `Enter` runs the **Daily Fund**: 4 companies, ~2 min,
-date-seeded so everyone plays the same fund today. `C` copies a share card:
-
-```
-SUPER CARRY BROS. #2
-🚀🦄🦄
-DPI 6.49x · TOP DECILE
-best exit $204M (20.4x)
-tmubashir.github.io/super-carry-bros
-```
+| File | What |
+|---|---|
+| `index.html` | The whole game. Single file, canvas, no build step, no external requests. |
+| `harness.html` | Automated playtester. Loads the real game and measures whether it's fun. |
+| `README.md` | Player-facing and **current**. |
+| `SUPER_CARRY_BROS_research.md` | ~90-source design research. Historical — predates the strip. |
+| `WORLD2_PROMPT.md` | The World 2 build spec. Historical — already implemented. |
 
 ---
 
-## 5. Current measured state
+## 4. The model
 
-Latest harness run: **15 pass · 3 warn · 1 fail · 0 invariant violations**
+| Event | TVPI |
+|---|---|
+| SAFE | +0.05 |
+| Term sheet | +0.10 |
+| Uncapped SAFE | +0.50 |
+| Stomp any enemy | +0.15 |
+| Beat a boss | +1.00 |
+| Pro rata pickup | +0.50 (heals what a down round took) |
+| **Down Round Goomba contact** | **−0.40**, knockback, 1.5s mercy |
 
-Verified in the shipped page, same level and boss, differing only in boss play:
+Start **1.00x**, **3 lives**. Death = TVPI ≤ 0, a pit, a Serial Pivot, a falling
+anchor, a boss attack, or the runway expiring. Death costs a life and restarts
+the current world.
 
-| Line | Grade | Best exit | DPI |
+Two enemy classes, and the split is the joke: `goomba` **drains** (a down round
+marks you down), `pivot` and `anchor` **kill outright** (a pivot ends you).
+`mover` is a harmless platform.
+
+Power-ups keep their Mario jobs: **board seat** = 1-UP, **2&20** = star (7s),
+**AI ACCELERATION** = 1.8x speed + run through NPCs for 9s — and deliberately
+does *nothing* about anchors, because that's the capital structure, not
+competition.
+
+Controls: `←/→` or `A/D`, `Space`/`↑`/`W` (hold for conviction jump), `Enter`
+daily fund, `B` skip to boss, `C` copy share card on an end screen.
+
+---
+
+## 5. Structure
+
+Two worlds, each one level ending at a mandatory boss:
+
+| World | Level | Runway | Boss |
 |---|---|---|---|
-| Patient (free hits) | TOP DECILE | $325M | 4.97 |
-| Bidder (stomp on sight) | SECOND QUARTILE | $69M | 1.77 |
+| 1 | `1-1` Demo Day | 45s | **TIER 1 VC** |
+| 2 | `2-1` Sand Hill Road | 55s | **DEBT HOLDERS** |
 
-L1 feel all green: coyote 83ms, jump buffer 83ms, input latency 1 frame,
-acceleration 7 frames to top speed, landing shake 0.21, stomp shake 0.15.
+There is no flag inside a level — walking off the right edge *is* arriving at the
+round. The boss stands in front of the signature; **three stomps** and he's out,
+then the flag behind him ends the level. Beat both worlds → `YOU RETURNED THE
+FUND`. Burn all three lives → game over. **No loop exists anywhere.**
 
-**The one FAIL: `Content variety`.** One level layout, replayed up to 10× per
-run, plus one boss room. A player has seen every tile the game owns in ~40
-seconds. This is the flow channel failing on the boredom side and it is the
-single biggest remaining lever. **This is the main job.**
+Registries that make new content cheap:
+- `WORLDS` — world order, level ids, runway seconds
+- `LEVELS` — every playable map + a `mods` object (that's the hook new level
+  rules hang off, e.g. `{theme:'valley', boss:'debt'}`)
+- `NPC` — each enemy declares `legend` / `spawn` / `update` / `draw` in one entry;
+  `spawnEntities()` iterates it, so a new enemy is one table entry, not three
+  edits in three places
+- `BOSSES` — every boss string and colour, keyed by `mods.boss`
 
-Open WARNs worth knowing:
-- **Secondary sale is dominated** — competent runs reach the flag 100% of the
-  time, so selling at 50% is never right. Dead surface; it needs a state where
-  it wins.
-- **Outcome ceiling** — only two grade bands show up in practice.
-- **Patience under human reaction** — at 133ms delay both lines survive; the
-  patient line only breaks down at 233ms. The trade-off exists but is thin.
+Grading is on final TVPI against `BANDS`: 9.5 / 7.5 / 5.5 / 3.0. Measured ceiling
+is ~12.8x if you take everything and stomp everything.
 
 ---
 
-## 6. The harness — read this before changing the game
+## 6. The harness — read before changing the game
 
 `harness.html` fetches `index.html`, extracts the `<script>`, and evaluates it
 against a stubbed canvas + audio. **It instruments the real shipped game and
 cannot drift from what you ship.** It never modifies `index.html`.
 
-It probes four timescales, because a game fails at each independently and a
-broken lower layer cannot be rescued from above:
+Probes four timescales — L1 feel, L2 decisions, L3 loop, L4 depth — plus fairness
+and an invariant sweep. It also runs **experiments**: applies candidate patches to
+the source *in memory*, replays with seeded bots, returns `ADOPT`/`REJECT`/`STALE`.
 
-- **L1 second-to-second — FEEL.** Is the verb pleasurable in a vacuum? Coyote
-  time, jump buffer, input latency, acceleration, hit-stop, landing weight.
-- **L2 second-to-minute — DECISIONS.** Competitive options, no dominant answer,
-  legible outcomes.
-- **L3 minute-to-hour — LOOP.** Reward cadence, difficulty tracking skill, variety.
-- **L4 hour-to-hundreds — DEPTH.** Does skill keep finding headroom?
-- Plus **FAIRNESS** (randomness before decisions, never after) and **BUGS**
-  (invariant sweep across full runs, input-mashing, clock expiry edge cases).
+**Current state: 14 pass · 3 warn · 0 fail · 0 invariant violations.**
+Open warns are all "more game to build", not breakage: content variety (2
+levels), skill spread 1.73x, outcome ceiling (2 bands seen).
 
-It also runs **experiments**: it applies candidate patches to the game source
-*in memory*, replays with seeded bots, and returns `ADOPT` / `REJECT` / `STALE`.
-A recommendation is a measured result, not a suggestion. Experiments are allowed
-to break the game — the shipped file is never touched and git holds the rollback.
-
-### Harness gotchas that already cost time
+### Gotchas that have already cost real time
 
 - **`judge(b, v)` takes (baseline, variant).** Passing a one-arg predicate
-  directly silently grades the *baseline*. This bug rejected good experiments
-  for several runs.
-- **A probe that matches nothing reports PASS.** The randomness probe matched
-  zero call sites after a rename and gave a clean bill of health on no evidence.
-  Probes now fail loudly when their own patterns go stale. Watch for `STALE`.
-- **A perfect bot makes patience look free.** It dodges everything, so the
-  patient line shows zero risk. There is a reaction-delay probe (0 / 133 / 233ms)
-  that prices execution; dominance is judged against imperfect play. Use it for
-  any "is this a real choice?" question.
-- **Browser caches `harness.html`.** Append `?v=N` when re-running after edits.
-- Bot policies: `bid` (rush), `wait` (stand off — meant to lose), `platform`
-  (camp — meant to lose), `engaged` (mid-range, dodge, punish — the skilled line).
+  silently grades the *baseline* and rejects good experiments.
+- **A probe that matches nothing reports PASS.** Watch for `STALE`. Fix the
+  pattern; never accept the green.
+- **Prune `EXPORTS` when you delete a function** — a stale symbol there breaks
+  the whole harness on boot. This has bitten twice.
+- **The harness never calls `render()`**, so drawing code is invisible to it.
+  Verify visuals by hand in the page.
+- **Browser caches `harness.html`** — append `?v=N` after edits.
+- Bot tiers must differ *behaviourally*: skill 0 walks into enemies, 1 dodges and
+  reads anchor tells, 2 also hunts stomps. A previous version had 0 and 1
+  identical and 2 suiciding on high coins, which made the skill ladder meaningless.
 
 ---
 
 ## 7. Non-negotiables
 
-**Design guardrails** (from the original spec — these are what make it shareable):
+**Design guardrails:**
 
 1. **The mechanic carries the joke, not the label.** If a feature is only funny
    because of its name, cut it.
-2. **Insider, not explainer.** No tooltips defining TVPI. The audience knows.
-   Anyone who doesn't should still enjoy the platforming.
-3. **Losing is normal.** Nine deaths per run is the design target.
-4. **Never punch at founders.** The game is a VC laughing at VCs. That is what
-   makes it shareable rather than annoying.
+2. **Insider, not explainer.** No tooltips defining TVPI.
+3. **Losing is normal.** Deaths are retries, not failure.
+4. **Never punch at founders.** The game is a VC laughing at VCs.
+5. **Mario mechanics, VC graphics.** If Mario doesn't have the system, question it.
+   The last pass deleted reserves, rounds, dilution, hype, secondaries, DPI and
+   exit pricing on exactly this test.
 
-**Technical invariants** (the harness enforces these — don't break them):
+**Technical invariants (the harness enforces these):**
 
-- **No randomness after a decision.** All RNG is cosmetic. Rolls that decide
-  whether an action succeeds remove credit and read as unfair.
-- **Determinism.** Same seed + same inputs = same run. Bisecting depends on it.
-- **Single file, no build step, no external requests.** The game must survive
-  being emailed to someone. Fully self-contained is also why it's safe.
+- **No randomness after a decision.** All RNG is cosmetic.
+- **Determinism.** Same seed + inputs = same run.
+- **Single file, no build step, no external requests.** It must survive being
+  emailed to someone. That's also the security posture — audited clean, no
+  secrets, no network calls, no storage.
 - **Verify by playing, not by force-setting state.** A real mistake made here:
-  the boss economics were "verified" by setting `mode='winded'` directly, which
-  proved the math while the line was unplayable in practice. Drive it with a bot
-  or your own inputs, end to end.
+  boss economics were "verified" by setting `mode='winded'` directly, which
+  proved the math while the line was unplayable. Drive it with a bot, end to end.
 
 ---
 
-## 8. The job for the new session
+## 8. Where to go next
 
-**Primary: kill the `Content variety` FAIL.** Build more levels, and make the
-minute-to-hour loop hold up. The original spec's world map, roughly in value order:
+`Content variety` is the standing weakness — two levels. The registries above
+make a third cheap: a map, a `LEVELS` entry, a `WORLDS` entry, optionally an `NPC`
+table entry. Candidates from the original spec, each needing **one new decision**
+rather than one new tile: 3-1 The AI Bubble (inverted gravity — ride the trash
+upward), 4-1 Capital Markets Frozen (ice grants a *higher* top speed some gaps
+require), 5-1 The Down Round (falling valuations are collectible light that
+permanently marks you down).
 
-| Level | Gimmick |
-|---|---|
-| **2-1 Competitive Process** | Auto-scrolling. Cannot go back, cannot slow down. 48 hours to sign. |
-| **3-1 The AI Bubble** | Water level. Everything floats up regardless of quality. |
-| **5-1 The Down Round** | Screen dims. Valuations rain from above, all lower than yours. |
-| **4-1 Capital Markets Frozen** | Ice. No traction, sliding everywhere. |
-| **6-1 The Anti-Portfolio** | Bonus level of companies you passed on, now enormous and untouchable. |
-| **8-1 The IPO Window** | A door that is closed 80% of the time. You wait. That is the level. |
+One open question the bots can't answer: **is −0.40 the right sting for a down
+round?** The harness measured "no change" in both directions because competent
+bots rarely get hit, so it's a feel call. Play it and decide.
 
-2-1 is the recommended first build: auto-scroll supplies escalating pressure for
-free, which also addresses "difficulty doesn't track rising skill."
-
-**Secondary: the virality loop.** The Daily Fund and share card exist and work.
-What's untested is whether the *result* is worth posting — whether the run
-produces a story worth telling in 6 emoji.
-
-### Research worth doing
-
-Go look at how other games solved these, then adapt — don't copy:
-
-- **Daily-run virality**: Wordle (one puzzle, spoiler-free emoji grid, everyone
-  on the same board), Balatro (run seeds, screenshot-worthy absurd numbers),
-  Slay the Spire daily climbs. What makes a *result* postable?
-- **Auto-scroll pressure**: Mario 1-1's design language for teaching without
-  tutorials; Downwell / Jetpack Joyride for escalation curves.
-- **Run-based depth from few rules**: Slay the Spire, Balatro, Into the Breach —
-  simple rules interacting to produce a space bigger than the rules. Depth, not
-  complexity. Go has five rules; chess has more rules and less depth.
-- **Game feel**: Steve Swink's *Game Feel*; Vlambeer's "juice it or lose it"
-  talk — hit-stop, screen shake, particles, why the verb matters most.
-- **Fun as learning**: Raph Koster's *Theory of Fun* — fun ends when learning
-  ends, which is exactly why one repeated level goes flat no matter how polished.
-- **Comedy games that traveled**: Papers Please, Frog Fractions, Universal
-  Paperclips — how a joke premise sustains past the first laugh.
-
-Note: **novelty is not depth.** It papers over a shallow system for exactly as
-long as content lasts. New levels must add *decisions*, not just new tiles.
-
-### Workflow that works
-
-1. Run the harness first. Read the FAILs and WARNs.
-2. Write an experiment before hand-tuning. The harness disagreed with my
-   instincts twice and was right both times — most recently, a slower dash fixed
-   the patient line while a longer telegraph did nothing, which is the opposite
-   of what I'd have shipped.
-3. Build, then verify by actually playing it end to end.
-4. Commit before applying a batch of recommendations, so there's a rollback.
-   There's a `pre-harness-recs` tag from an earlier round.
-5. Push and hash-verify the live deploy.
-
----
-
-## 9. Ops notes
-
-- Commits must use `tmubashir@users.noreply.github.com`. The personal address
-  leaked into early commits and was scrubbed via history rewrite; global git
-  config is set correctly now. Don't reintroduce it.
-- `.claude/` is gitignored (local tool permissions — not for a public repo).
-- Repo is public and has been audited: no secrets, no credentials, no outbound
-  network calls, no cookies or storage. Keep it that way — the zero-dependency,
-  zero-request property is both a feature and the security posture.
+Suggested first move in a new session: run the harness, read the warns, then
+pick one thing. Commit before a batch of changes so any one is revertible.
